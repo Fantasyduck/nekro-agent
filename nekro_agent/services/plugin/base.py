@@ -445,6 +445,7 @@ class NekroPlugin:
         method_type: SandboxMethodType,
         name: str,
         description: str = "",
+        requires_superuser: bool = False,
     ) -> Callable[[Callable], Callable]:
         """挂载沙盒方法
 
@@ -454,6 +455,10 @@ class NekroPlugin:
             method_type (SandboxMethodType): 方法类型
             name (str): 方法名称
             description (str): 方法描述
+            requires_superuser (bool): 声明该方法仅供超级用户使用。
+
+                core 不会据此自动拦截（沙盒 RPC 拿不到发起人语义），
+                仅用于声明-实现一致性校验，具体判定由插件方法体完成。
 
         Returns:
             装饰器函数
@@ -461,7 +466,9 @@ class NekroPlugin:
 
         def decorator(func: Callable) -> Callable:
             func._method_type = method_type  # noqa: SLF001  # pyright: ignore[reportFunctionMemberAccess]
-            self.sandbox_methods.append(SandboxMethod(method_type, name, description, func))
+            self.sandbox_methods.append(
+                SandboxMethod(method_type, name, description, func, requires_superuser=requires_superuser)
+            )
             # logger.debug(f"从插件 {self.name} 挂载沙盒方法 {name} 成功")
             return func
 

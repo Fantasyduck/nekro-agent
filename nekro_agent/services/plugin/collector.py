@@ -528,6 +528,17 @@ class PluginCollector:
             logger.success(
                 f'插件加载成功: "{plugin.name}" by "{plugin.author or "未知"}"{" [内置]" if is_builtin else ""}{" [云端]" if is_package else ""}',
             )
+            # 超级用户声明一致性校验：声明了 requires_superuser 却没标记
+            # permission_checked，说明插件作者以为 core 会拦截。实际不会——
+            # 沙盒 RPC 拿不到发起人语义，core 无法自行判定。此处告警以免漏拦。
+            try:
+                from nekro_agent.services.plugin.utils import audit_superuser_declarations
+
+                for warning in audit_superuser_declarations(plugin):
+                    logger.warning(f"[权限声明] {warning}")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[权限声明] 校验插件 {plugin.name} 时出错: {e}")
+
             plugin._update_plugin_type(is_builtin, is_package)  # noqa: SLF001
             if plugin.key not in config.PLUGIN_ENABLED:
                 # 直接设置状态为禁用，不触发回调（因为插件刚加载，没有从启用变为禁用）
