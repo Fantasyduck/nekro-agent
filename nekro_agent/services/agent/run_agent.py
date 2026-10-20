@@ -40,6 +40,10 @@ def _summarize_runtime_text(text: str, limit: int = 160) -> str:
     return compact if len(compact) <= limit else compact[: limit - 1] + "…"
 
 
+class AgentIterationLimitError(RuntimeError):
+    """The execution budget was exhausted before the agent completed its task."""
+
+
 class AllLLMRequestsFailedError(ValueError):
     """All LLM API retries are exhausted for a single agent request."""
 
@@ -164,6 +168,7 @@ async def run_agent(
             one_time_code=one_time_code,
             config=config,
             model_group=used_model_group,
+            trigger_message=chat_message,
         ),
     )
 
@@ -220,7 +225,7 @@ async def run_agent(
     logger.debug(f"[run_agent] {chat_key} | LLM 请求完成，开始解析响应")
     parsed_code_data: ParsedCodeRunData = parse_chat_response(llm_response.response_content)
 
-    for i in range(config.AI_SCRIPT_MAX_RETRY_TIMES):
+    for i in range(iteration_total):
         addition_prompt_message: List[OpenAIChatMessage] = []
         sandbox_output = ""
         raw_output = ""
@@ -258,6 +263,22 @@ async def run_agent(
             sandbox_stop_type=stop_type.value,
             error_summary=_summarize_runtime_text(sandbox_output),
         )
+
+        # 最后一轮必须执行，但不能再生成一份不会被执行的回复。
+        if current_iteration >= iteration_total:
+            error_summary = (
+                f"Agent 执行次数已耗尽 ({current_iteration}/{iteration_total})，"
+                f"最后停止类型: {stop_type.name}。任务未正常完成。"
+            )
+            logger.error(f"[run_agent] {chat_key} | {error_summary}")
+            await publish_runtime_state(
+                phase="failed",
+                iteration_index=current_iteration,
+                model_name=llm_response.use_model,
+                sandbox_stop_type=stop_type.value,
+                error_summary=error_summary,
+            )
+            raise AgentIterationLimitError(error_summary)
 
         # 添加 AI 回复的原始内容到上下文
         addition_prompt_message.append(OpenAIChatMessage.from_text("assistant", llm_response.response_content))
@@ -333,6 +354,8 @@ async def run_agent(
                 one_time_code=one_time_code,
                 plugin_injected_prompt=runtime_prompt,
                 record_sta_timestamp=history_render_until_time,
+                bot_platform_id=self_info.user_id,
+                trigger_message=chat_message,
                 model_group=used_model_group,
                 config=config,
             ),
@@ -343,9 +366,9 @@ async def run_agent(
                 "user",
                 "\nplease DO NOT give any extra explanation or apology and keep the response format for retry."
                 + (
-                    f" This is the last retry. Describe the reason if you can't finish the task. (Iteration times: {i + 1}/{config.AI_SCRIPT_MAX_RETRY_TIMES})"
-                    if i == config.AI_SCRIPT_MAX_RETRY_TIMES - 1
-                    else "(Iteration times: {i + 1}/{config.AI_SCRIPT_MAX_RETRY_TIMES})"
+                    f" This is the last retry. Describe the reason if you can't finish the task. (Iteration times: {current_iteration + 1}/{iteration_total})"
+                    if current_iteration == iteration_total - 1
+                    else f"(Iteration times: {current_iteration + 1}/{iteration_total})"
                 ),
             ),
         )
