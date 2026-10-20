@@ -47,7 +47,36 @@ async def rpc_exec(container_key: str, from_chat_key: str, data: Request) -> Res
     args = [ctx, *rpc_request.args] if rpc_request.args else [ctx]
     kwargs = rpc_request.kwargs or {}
 
+    # 4.2.4+ 轨迹埋点：工具调用的真实发生地（沙盒代码 -> RPC -> 插件方法）
+    # 这里是唯一能同时拿到「方法名 + 参数 + 返回值 + 错误 + 耗时」的位置。
+    import time as _t
+
+    _tool_start = _t.time()
     result, error_message = await execute_rpc_method(method, args, kwargs)
+    _tool_ms = int((_t.time() - _tool_start) * 1000)
+
+    try:
+        from nekro_agent.services.agent.trace import emit as trace_emit
+
+        # 返回值转成可序列化的短预览（避免 trace 文件被大对象撑爆）
+        try:
+            _preview = str(result)[:400] if result is not None else ""
+        except Exception:  # noqa: BLE001
+            _preview = "<unprintable>"
+        trace_emit(
+            "tool_call",
+            from_chat_key,
+            phase="tool_call",
+            tool_name=rpc_request.method,
+            tool_type=method_type.value,
+            tool_ms=_tool_ms,
+            tool_ok=not bool(error_message),
+            tool_result_preview=_preview,
+            tool_error=str(error_message)[:300] if error_message else "",
+            tool_args_preview=repr(list(rpc_request.args or []))[:300],
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     if method_type in [SandboxMethodType.AGENT, SandboxMethodType.BEHAVIOR]:
         await message_service.push_system_message(chat_key=from_chat_key, agent_messages=str(result))
