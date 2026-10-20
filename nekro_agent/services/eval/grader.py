@@ -48,6 +48,7 @@ def grade_case(
     max_chars: Optional[int] = None,
     max_method_ratio: Optional[float] = None,
     require_tools: bool = True,
+    expected_tools: Optional[List[str]] = None,
 ) -> GradeResult:
     """对单个用例打分。
 
@@ -61,9 +62,12 @@ def grade_case(
     result.current = measure_prompt(current_prompt)
 
     # ---- 内容断言：工具不能丢
-    if require_tools and case.expect_tools:
+    # live 模式下 expected_tools 来自「同口径 full 渲染」，
+    # 避免把「插件激活状态变化」误判成「压缩丢了工具」
+    want_tools = expected_tools if expected_tools is not None else case.expect_tools
+    if require_tools and want_tools:
         current_names = set(result.current.method_names)
-        missing = [t for t in case.expect_tools if t not in current_names]
+        missing = [t for t in want_tools if t not in current_names]
         if missing:
             result.passed = False
             result.errors.append(f"丢失 {len(missing)} 个工具定义: " + ", ".join(missing[:8]))

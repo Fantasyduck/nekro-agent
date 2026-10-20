@@ -108,3 +108,17 @@ def measure_prompt(system_prompt: str, *, rule_markers: Optional[List[str]] = No
             m.rule_depth = round(sum(positions) / len(positions), 4)
 
     return m
+
+
+def extract_plugins_segment(system_prompt: str) -> str:
+    """从 system prompt 中抽出 <plugins>...</plugins> 段。
+
+    M1 系列的改造全部发生在插件 prompt 组装层（工具定义压缩、插件注入分级），
+    框架段与历史段不受影响。对比时两边都只取插件段，才能公平比较。
+    """
+    text = system_prompt or ""
+    i = text.find("<plugins>")
+    j = text.rfind("</plugins>")
+    if i < 0 or j <= i:
+        return ""
+    return text[i : j + len("</plugins>")]

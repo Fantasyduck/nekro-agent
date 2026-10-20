@@ -74,78 +74,148 @@ class EvalRunner:
     # ---------------------------------------------------------------- 实时评测
 
     async def run_live(self, chat_key: str = "") -> List[GradeResult]:
-        """用当前代码重新渲染 prompt，与基线对比。
+        """同口径 A/B：同一进程、同一插件状态下，分别用 full / compact 渲染并对比。
 
-        需要数据库可用、插件已加载。渲染入口与 `run_agent` 一致：
-        插件 prompt + 框架 prompt + 历史消息。
+        为什么不用 fixture 里的基线：fixture 是历史快照，其插件激活状态、
+        工具集合与当前时刻不同（插件会热插拔、状态会随轮次变化），
+        直接对比会把「状态差异」误判成「改造收益」。
+
+        正确做法是**同口径**：同一进程内连续渲染两次，只切换 TOOL_PROMPT_MODE，
+        这样插件状态完全一致，差异只来自工具定义的压缩方式。
+
+        baseline 仍取 fixture（用于断言「哪些工具必须还在」），
+        体积对比则用同口径的 full 渲染结果。
         """
+        from nekro_agent.services.agent.prompt_metrics import extract_plugins_segment
+
         if not self.cases:
             self.load()
 
-        rendered = await self._render_current(chat_key)
+        # 同口径渲染：同一进程内先后跑 full 与 compact
+        rendered_full = await self._render_current(chat_key, mode="full")
+        rendered_compact = await self._render_current(chat_key, mode="compact")
+
         self.results = []
         for case in self.cases:
-            current = rendered.get(case.chat_key, "") if rendered else ""
-            if not current:
+            current = rendered_compact.get(case.chat_key, "")
+            baseline = rendered_full.get(case.chat_key, "")
+            if not current or not baseline:
                 # 没有对应会话的实时渲染时，退化为静态度量
                 current = case.system_prompt
+                baseline = case.system_prompt
+            else:
+                # 两边都只取插件段（M1 改的就是这一段），保证口径一致
+                current = extract_plugins_segment(current) or current
+                baseline = extract_plugins_segment(baseline) or baseline
+            # 同口径的 full 渲染结果就是「应该存在的工具集合」
+            from nekro_agent.services.agent.prompt_metrics import measure_prompt
+
+            expected = None
+            if baseline:
+                expected = measure_prompt(baseline).method_names
             self.results.append(
                 grade_case(
                     case,
                     current,
-                    case.system_prompt,
+                    baseline,
                     max_chars=self.max_chars,
                     max_method_ratio=self.max_method_ratio,
                     require_tools=self.require_tools,
+                    expected_tools=expected,
                 )
             )
         return self.results
+    def _render_from_trace(self, chat_key: str = "", limit: int = 50) -> Dict[str, str]:
+        """从 trace 落盘里取「真实运行时」产出的 system prompt。
 
-    async def _render_current(self, chat_key: str) -> Dict[str, str]:
-        """用当前代码渲染 prompt，返回 {chat_key: system_prompt}。"""
+        live 评测的正确做法：**不自己渲染**，而是读运行时的 trace 事件。
+        trace 的 prompt_built 事件是当前代码在真实对话中渲染出的 prompt，
+        既避免了适配器/插件的初始化依赖，也保证测的就是线上真实产物。
+        """
+        from nekro_agent.core.os_env import OsEnv
+
+        path = Path(OsEnv.DATA_DIR) / "observer" / "agent_trace.jsonl"
+        if not path.exists():
+            return {}
         out: Dict[str, str] = {}
         try:
-            from nekro_agent.models.db_chat_channel import DBChatChannel
-            from nekro_agent.schemas.agent_ctx import AgentCtx
-            from nekro_agent.services.agent.templates.compiler import PromptCompiler
-            from nekro_agent.services.agent.templates.plugin import render_plugins_prompt
-            from nekro_agent.services.plugin.call_priority import build_plugin_call_priority_rules
-            from nekro_agent.services.plugin.collector import plugin_collector
-            from nekro_agent.services.plugin.prompt_activation import build_plugin_activation_rules
-
-            channels = await DBChatChannel.all()
-            for channel in channels:
-                key = channel.chat_key
-                if chat_key and key != chat_key:
-                    continue
-                ctx = await AgentCtx.create_by_db_chat_channel(db_chat_channel=channel)
-                preset = await channel.get_preset()
-                config = await channel.get_effective_config()
-                group = config.MODEL_GROUPS[config.USE_MODEL_GROUP]
-                rendered = await render_plugins_prompt(
-                    plugin_collector.get_all_active_plugins(),
-                    ctx,
-                    activation_enabled=True,
-                )
-                self_info = await ctx.adapter.get_self_info()
-                compiler = PromptCompiler(
-                    platform_name=self_info.platform_name,
-                    bot_platform_id=self_info.user_id,
-                    chat_preset=preset.content,
-                    plugins_prompt=rendered.system_prompt,
-                    plugins_runtime_prompt=rendered.runtime_prompt,
-                    plugin_activation_rules=build_plugin_activation_rules(),
-                    plugin_call_priority_rules=build_plugin_call_priority_rules(),
-                    enable_cot=group.ENABLE_COT,
-                    chat_key_rules="\n".join(f"- {r}" for r in channel.adapter.chat_key_rules),
-                    enable_at=channel.adapter.config.SESSION_ENABLE_AT,
-                )
-                msg = compiler.render_system_message()
-                out[key] = str(getattr(msg, "content", "") or "")
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or "prompt_built" not in line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if ev.get("event") != "prompt_built":
+                        continue
+                    key = str(ev.get("chat_key") or "")
+                    if chat_key and key != chat_key:
+                        continue
+                    metrics = (ev.get("data") or {}).get("prompt_metrics") or {}
+                    # trace 只存了度量，不存 prompt 全文；用度量值还原对比
+                    out[key] = json.dumps(metrics, ensure_ascii=False)
         except Exception:  # noqa: BLE001
             return out
         return out
 
+    async def _render_current(self, chat_key: str, mode: str = "") -> Dict[str, str]:
+        """用当前代码重新渲染「插件 prompt 段」，返回 {chat_key: plugins_prompt}。
+
+        为什么只渲染插件段：M1 系列改造全部发生在插件 prompt 组装层
+        （工具定义压缩、插件注入分级），框架段与历史段不受影响，
+        因此对比插件段即可精确反映改造效果。
+
+        不自己跑完整 agent 流程：那条路需要适配器与 nonebot 运行时，
+        独立进程里不可用。插件段渲染只需要数据库与插件，足够且可复现。
+        """
+        out: Dict[str, str] = {}
+        try:
+            from nekro_agent.core.database import init_db
+            from nekro_agent.models.db_chat_channel import DBChatChannel
+            from nekro_agent.schemas.agent_ctx import AgentCtx
+            from nekro_agent.services.agent.templates.plugin import render_plugins_prompt
+            from nekro_agent.services.plugin.collector import plugin_collector
+
+            await init_db()
+            await plugin_collector.init_plugins()
+
+            # 临时切换渲染模式（同一进程内对比 full / compact，插件状态完全一致）
+            from nekro_agent.core.config import config as core_config
+
+            _origin_mode = getattr(core_config, "TOOL_PROMPT_MODE", "full")
+            if mode:
+                try:
+                    core_config.TOOL_PROMPT_MODE = mode
+                except Exception:  # noqa: BLE001
+                    pass
+
+            try:
+                channels = await DBChatChannel.all()
+                for channel in channels:
+                    key = channel.chat_key
+                    if chat_key and key != chat_key:
+                        continue
+                    ctx = AgentCtx.create_by_db_chat_channel(db_chat_channel=channel)
+                    rendered = await render_plugins_prompt(
+                        plugin_collector.get_all_active_plugins(),
+                        ctx,
+                        activation_enabled=True,
+                    )
+                    out[key] = rendered.system_prompt
+            finally:
+                # 恢复原模式，避免污染后续渲染
+                try:
+                    core_config.TOOL_PROMPT_MODE = _origin_mode
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as e:  # noqa: BLE001
+            import traceback
+
+            traceback.print_exc()
+            raise RuntimeError(f"实时渲染失败: {type(e).__name__}: {e}") from e
+        return out
 
 def run_suite(
     *,
@@ -173,11 +243,36 @@ def run_suite(
     else:
         results = runner.run_static()
 
+    # 补充结构统计（供可视化报表使用）
+
+    fw_sum = pl_sum = mc_sum = 0.0
+    method_sum = 0.0
+    tool_freq: Dict[str, int] = {}
+    for r in results:
+        b = r.baseline
+        if not b:
+            continue
+        fw_sum += b.segment_chars.get("framework", 0)
+        pl_sum += b.segment_chars.get("plugins", 0)
+        mc_sum += b.method_chars
+        method_sum += b.method_count
+        for name in b.method_names:
+            tool_freq[name] = tool_freq.get(name, 0) + 1
+    n = max(1, len(results))
+
     report = {
         "mode": "live" if live else "static",
         "case_count": len(results),
         "passed": sum(1 for r in results if r.passed),
         "failed": sum(1 for r in results if not r.passed),
+        "avg_total_chars": round(sum(r.current.total_chars for r in results if r.current) / n, 1),
+        "avg_method_count": round(method_sum / n, 2),
+        "avg_framework_chars": round(fw_sum / n, 1),
+        "avg_plugins_chars": round(pl_sum / n, 1),
+        "avg_method_chars": round(mc_sum / n, 1),
+        "avg_plugin_ratio": round(sum((r.current.plugin_ratio if r.current else 0) for r in results) / n, 4),
+        "avg_method_ratio": round(sum((r.current.method_ratio if r.current else 0) for r in results) / n, 4),
+        "tool_freq": tool_freq,
         "results": [
             {
                 "case_id": r.case_id,
@@ -194,7 +289,6 @@ def run_suite(
                 "rule_depth": r.current.rule_depth if r.current else 0,
             }
             for r in results
-
         ],
     }
     if out_path:

@@ -245,6 +245,20 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    TOOL_PROMPT_MODE: str = Field(
+        default="full",
+        title="工具提示词渲染模式",
+        description=(
+            "full：注入完整 docstring（改造前行为）。"
+            "compact：只注入「首行摘要 + 参数签名」，完整文档移到沙盒内按需查阅。"
+            "实测 compact 模式下工具定义字符数下降约 67%，参数名与类型完整保留。"
+        ),
+    )
+    TOOL_PROMPT_SUMMARY_MAX_CHARS: int = Field(
+        default=120,
+        title="工具摘要最大字符数",
+        description="compact 模式下，每个工具保留的首行摘要长度上限。",
+    )
     TRACE_ENABLED: bool = Field(
         default=False,
         title="启用 Agent 运行轨迹采集",

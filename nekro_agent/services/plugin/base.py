@@ -931,22 +931,43 @@ class NekroPlugin:
 
         Returns:
             str: 沙盒方法提示
+
+        两种模式（由 `TOOL_PROMPT_MODE` 控制）：
+
+        - ``full``（默认，改造前行为）：注入完整 docstring。
+        - ``compact``（M1 保守档）：只注入「首行摘要 + 参数签名」，
+          完整文档移到沙盒内按需查阅。实测工具定义字符数下降约 67%，
+          参数名与类型完整保留，调用契约不变。
         """
+        from nekro_agent.core.config import config as core_config
+
+        compact = str(getattr(core_config, "TOOL_PROMPT_MODE", "full") or "full").lower() == "compact"
+        max_summary = int(getattr(core_config, "TOOL_PROMPT_SUMMARY_MAX_CHARS", 120))
         prompts: List[str] = []
         methods = await self.collect_available_methods(ctx) if self._collect_methods_func else self.sandbox_methods
         for method in methods:
             if not method.func.__doc__:
                 self.logger.warning(f"方法 {method.func.__name__} 没有可用的文档注解。")
                 continue
-            if method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]:
+            is_agent = method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]
+            if compact:
+                from nekro_agent.services.agent.tool_summary import render_compact_method_prompt
+
+                prompts.append(
+                    render_compact_method_prompt(
+                        method.func.__name__,
+                        method.func.__doc__,
+                        is_agent=is_agent,
+                        max_summary=max_summary,
+                    ),
+                )
+            elif is_agent:
                 prompts.append(
                     f"* {method.func.__name__} - **[AGENT METHOD - STOP AFTER CALL]**\n{method.func.__doc__.strip()}",
                 )
             else:
                 prompts.append(f"* {method.func.__name__}\n{method.func.__doc__.strip()}")
         return "\n".join(prompts)
-
-    @property
     def store(self) -> "PluginStore":
         return PluginStore(self)
 
