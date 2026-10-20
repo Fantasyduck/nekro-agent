@@ -148,8 +148,10 @@ def render_index(docs: List[ToolDoc], *, max_summary: int = 28) -> str:
     """
     lines = [
         "共 %d 个工具，完整文档在沙盒 /app/tools/（index.md + by-plugin/<插件>/<工具>.md）。" % len(docs),
-        "看清单：print(open('/app/tools/index.md').read())",
-        "看详情：print(open('/app/tools/by-plugin/<插件>/<工具>.md').read())",
+        "看清单：print(open('/app/tools/index.md').read()); exit(9)",
+        "看详情：print(open('/app/tools/by-plugin/<插件>/<工具>.md').read()); exit(9)",
+        "TOOL 结果或文档需要交回模型分析时，用 print(result) 后接 exit(9)；单独 print 不会触发续答。",
+        "续答后用发送工具回应原请求；已发送的内容不要重复，已完成的任务不必 exit(9)。",
         "**只调用下列工具名，不确定参数先看文档，不要猜。**",
         "",
     ]
