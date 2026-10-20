@@ -150,7 +150,20 @@ async def render_plugins_prompt(
     units = await build_prompt_disclosure_view(plugins, ctx)
     units = _sort_plugin_units_for_cache(units)
     runtime_units = await _enrich_units_with_inject(units, plugins, ctx, states={"active", "always_awake"})
+    body = "\n\n".join([await _render_plugin_prompt(unit) for unit in units])
+
+    # M1 标准档：工具定义移出，只留索引（常驻工具仍在上面的插件块里）
+    from nekro_agent.core.config import config as core_config
+
+    if str(getattr(core_config, "TOOL_PROMPT_MODE", "full") or "full").lower() == "index":
+        from nekro_agent.services.agent.tool_registry import build_registry, render_index
+
+        _always = list(getattr(core_config, "TOOL_REGISTRY_ALWAYS_LIST", []) or [])
+        docs = build_registry(plugins, always_list=_always)
+        if docs:
+            body = body + "\n\n<tool_registry>\n" + render_index(docs) + "\n</tool_registry>"
+
     return RenderedPluginPrompts(
-        system_prompt="\n\n".join([await _render_plugin_prompt(unit) for unit in units]),
+        system_prompt=body,
         runtime_prompt=_render_plugin_runtime_prompt(runtime_units),
     )

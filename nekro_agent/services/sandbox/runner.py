@@ -71,6 +71,7 @@ EXEC_SCRIPT = f"""
 rm -f {CONTAINER_WORK_DIR}/{RUN_CODE_FILENAME} &&
 cp {CONTAINER_SHARE_DIR}/{CODE_FILENAME} {CONTAINER_WORK_DIR}/{RUN_CODE_FILENAME} &&
 cp {CONTAINER_SHARE_DIR}/{API_CALLER_FILENAME} {CONTAINER_WORK_DIR}/{RUN_API_CALLER_FILENAME} &&
+if [ -d {CONTAINER_SHARE_DIR}/tools ]; then rm -rf {CONTAINER_WORK_DIR}/tools && cp -r {CONTAINER_SHARE_DIR}/tools {CONTAINER_WORK_DIR}/tools && chmod -R a+rX {CONTAINER_WORK_DIR}/tools; fi &&
 export MPLCONFIGDIR=/app/tmp/matplotlib &&
 python {RUN_CODE_FILENAME}
 exit_code=$?
@@ -141,6 +142,47 @@ async def limited_run_code(
         )
 
 
+async def _write_tool_registry(host_shared_dir: Path, ctx: Optional[AgentCtx]) -> None:
+    """把工具目录写入沙盒共享目录（M1 标准档）。
+
+    只在 TOOL_PROMPT_MODE=index 时生效。目录树：
+      shared/tools/index.md
+      shared/tools/index.json
+      shared/tools/by-plugin/<插件>/<工具>.md
+
+    容器内以 /app/shared/tools 挂载可见；EXEC_SCRIPT 会把它复制到 /app/tools，
+    保证模型在任意工作目录都能用相对/绝对路径读到。
+    """
+    from nekro_agent.core.config import config as core_config
+
+    if str(getattr(core_config, "TOOL_PROMPT_MODE", "full") or "full").lower() != "index":
+        return
+
+    from nekro_agent.services.agent.tool_registry import build_files, build_registry
+    from nekro_agent.services.plugin.collector import plugin_collector
+
+    _always = list(getattr(core_config, "TOOL_REGISTRY_ALWAYS_LIST", []) or [])
+    docs = build_registry(plugin_collector.get_all_active_plugins(), always_list=_always)
+    if not docs:
+        return
+    files = build_files(docs)
+    root = Path(host_shared_dir) / "tools"
+    # 每次重建：插件可能热重载，不能缓存
+    if root.exists():
+        import shutil
+
+        shutil.rmtree(root, ignore_errors=True)
+    for rel, content in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+    try:
+        Path.chmod(root, 0o777)
+    except Exception:  # noqa: BLE001
+        pass
+    logger.debug(f"工具目录已写入: {len(files)} 个文件, {len(docs)} 个工具")
+
+
 async def run_code_in_sandbox(
     code_run_data: ParsedCodeRunData,
     from_chat_key: str,
@@ -177,6 +219,12 @@ async def run_code_in_sandbox(
     # 写入要执行的代码
     code_file_path = Path(host_shared_dir) / CODE_FILENAME
     code_file_path.write_text(f"{CODE_PREAMBLE.strip()}\n\n{code_run_data.code_content}", encoding="utf-8")
+
+    # M1 标准档：把工具目录写入沙盒（index 模式才做，其它模式零开销）
+    try:
+        await _write_tool_registry(host_shared_dir, ctx)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"写入工具目录失败（不影响本次执行）: {type(e).__name__}: {e}")
 
     # 设置目录权限
     try:

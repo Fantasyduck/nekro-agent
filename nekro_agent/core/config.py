@@ -249,25 +249,53 @@ class CoreConfig(ConfigBase):
         default=False,
         title="启用离线评测框架",
         description="开启后可通过 python -m nekro_agent.services.eval 跑 prompt 回归评测（不调 LLM）。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="启用离线评测框架", en_US="Enable Offline Eval"),
+        ).model_dump(),
     )
     EVAL_FIXTURE_DIR: str = Field(
         default="",
         title="评测 fixture 目录",
         description="留空则使用 services/eval/fixtures；也可指向自定义用例目录。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="评测 fixture 目录", en_US="Eval Fixture Directory"),
+        ).model_dump(),
     )
     TOOL_PROMPT_MODE: str = Field(
         default="full",
         title="工具提示词渲染模式",
         description=(
             "full：注入完整 docstring（改造前行为）。"
-            "compact：只注入「首行摘要 + 参数签名」，完整文档移到沙盒内按需查阅。"
-            "实测 compact 模式下工具定义字符数下降约 67%，参数名与类型完整保留。"
+            "compact：只注入「首行摘要 + 参数签名」（M1 保守档，工具定义 -66%）。"
+            "index：工具定义全部移出，只留索引；完整文档写入沙盒 /app/tools/（M1 标准档）。"
         ),
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="工具提示词渲染模式", en_US="Tool Prompt Mode"),
+        ).model_dump(),
     )
     TOOL_PROMPT_SUMMARY_MAX_CHARS: int = Field(
         default=120,
         title="工具摘要最大字符数",
         description="compact 模式下，每个工具保留的首行摘要长度上限。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="工具摘要最大字符数", en_US="Tool Summary Max Chars"),
+        ).model_dump(),
+    )
+    TOOL_REGISTRY_ALWAYS_LIST: List[str] = Field(
+        default_factory=lambda: ["send_msg_text", "send_msg_file"],
+        title="常驻工具",
+        description=(
+            "index 模式把工具定义移出 system prompt 只留索引，但极少数高频工具"
+            "（发消息等）仍全量注入，避免连发消息都要先查文档。"
+        ),
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="常驻工具列表", en_US="Always-Listed Tools"),
+        ).model_dump(),
     )
     TRACE_ENABLED: bool = Field(
         default=False,
@@ -276,16 +304,28 @@ class CoreConfig(ConfigBase):
             "在 agent 主循环中记录结构化运行事件（prompt 度量 / 阶段 / 耗时），"
             "用于评估 prompt 组装等改造是否真的变好。关闭时零开销。"
         ),
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="启用 Agent 运行轨迹采集", en_US="Enable Agent Trace"),
+        ).model_dump(),
     )
     TRACE_PERSIST: bool = Field(
         default=False,
         title="轨迹落盘为 JSONL",
         description="开启后把轨迹事件追加写入 observer/agent_trace.jsonl，便于离线分析。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="轨迹落盘为 JSONL", en_US="Persist Trace to JSONL"),
+        ).model_dump(),
     )
     TRACE_BUFFER_SIZE: int = Field(
         default=2000,
         title="轨迹内存缓冲条数",
         description="内存中保留的最近事件数上限，超出自动丢弃最旧的（防内存泄漏）。",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(zh_CN="上下文工程", en_US="Context Engineering"),
+            i18n_title=i18n_text(zh_CN="轨迹内存缓冲条数", en_US="Trace Buffer Size"),
+        ).model_dump(),
     )
     MAX_UPLOAD_SIZE_MB: int = Field(
         default=10,

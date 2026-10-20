@@ -92,6 +92,23 @@ def measure_prompt(system_prompt: str, *, rule_markers: Optional[List[str]] = No
     # 不做全文兜底：沙盒「已安装包」列表同样是 `* name` 形态，
     # 全文匹配会把 numpy/pandas 之类算成工具，指标失真。
     m.method_names = names
+
+    # index 模式：工具名在 <tool_registry> 的索引里（按插件分组的逗号清单），
+    # 不是 `* name` 形态，上面的正则抓不到。这里补一次索引解析，
+    # 否则 grader 会把「工具定义被移出」误判成「工具全部丢失」。
+    _reg = re.search(r"<tool_registry>(.*?)</tool_registry>", text, re.S)
+    if _reg:
+        _idx_names: List[str] = []
+        for _line in _reg.group(1).split("\n"):
+            _mm = re.match(r"^\s*-\s*[A-Za-z0-9_.]+\s*:\s*(.+)$", _line)
+            if _mm:
+                for _tok in _mm.group(1).split(","):
+                    _n = _tok.strip().strip("`")
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _n):
+                        _idx_names.append(_n)
+        if _idx_names:
+            m.method_names = list(dict.fromkeys(list(m.method_names) + _idx_names))
+            m.method_count = len(m.method_names)
     m.method_count = len(names)
     m.method_chars = method_chars
     m.method_ratio = round(method_chars / total, 4) if total else 0.0

@@ -66,6 +66,9 @@ def grade_case(
     # 避免把「插件激活状态变化」误判成「压缩丢了工具」
     want_tools = expected_tools if expected_tools is not None else case.expect_tools
     if require_tools and want_tools:
+        # 注意：fixture 的 expect_tools 来自历史 chat_log 快照，可能包含
+        # 当时活跃、现已停用的插件工具。live 模式会用同口径 full 渲染覆盖它，
+        # static 模式下这类差异属于环境变化，不是改造回归。
         current_names = set(result.current.method_names)
         missing = [t for t in want_tools if t not in current_names]
         if missing:

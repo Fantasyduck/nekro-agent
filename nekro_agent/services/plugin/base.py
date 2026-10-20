@@ -932,16 +932,35 @@ class NekroPlugin:
         Returns:
             str: 沙盒方法提示
 
-        两种模式（由 `TOOL_PROMPT_MODE` 控制）：
+        三种模式（由 `TOOL_PROMPT_MODE` 控制）：
 
-        - ``full``（默认，改造前行为）：注入完整 docstring。
+        - ``full``：注入完整 docstring（改造前行为）。
         - ``compact``（M1 保守档）：只注入「首行摘要 + 参数签名」，
-          完整文档移到沙盒内按需查阅。实测工具定义字符数下降约 67%，
-          参数名与类型完整保留，调用契约不变。
+          完整文档移到沙盒内按需查阅。实测工具定义字符数下降约 67%。
+        - ``index``（M1 标准档）：**工具定义全部移出 system prompt**，
+          只留一份索引；完整文档写入沙盒 /app/tools/，模型需要时自己 cat。
+          常驻工具（TOOL_REGISTRY_ALWAYS_LIST）仍全量注入，避免发消息也要查文档。
         """
         from nekro_agent.core.config import config as core_config
 
-        compact = str(getattr(core_config, "TOOL_PROMPT_MODE", "full") or "full").lower() == "compact"
+        mode = str(getattr(core_config, "TOOL_PROMPT_MODE", "full") or "full").lower()
+        if mode == "index":
+            # index 模式下本插件只注入「常驻工具」的完整定义；
+            # 其余工具由 tool_registry 统一生成索引（见 render_plugins_prompt）
+            always = {
+                str(x).strip()
+                for x in (getattr(core_config, "TOOL_REGISTRY_ALWAYS_LIST", []) or [])
+            }
+            methods_all = await self.collect_available_methods(ctx) if self._collect_methods_func else self.sandbox_methods
+            keep = [m for m in methods_all if m.func.__name__ in always and m.func.__doc__]
+            parts: List[str] = []
+            for method in keep:
+                is_agent = method.method_type in [SandboxMethodType.AGENT, SandboxMethodType.MULTIMODAL_AGENT]
+                flag = " - **[AGENT METHOD - STOP AFTER CALL]**" if is_agent else ""
+                parts.append(f"* {method.func.__name__}{flag}\n{method.func.__doc__.strip()}")
+            return "\n".join(parts)
+
+        compact = mode == "compact"
         max_summary = int(getattr(core_config, "TOOL_PROMPT_SUMMARY_MAX_CHARS", 120))
         prompts: List[str] = []
         methods = await self.collect_available_methods(ctx) if self._collect_methods_func else self.sandbox_methods
@@ -968,6 +987,8 @@ class NekroPlugin:
             else:
                 prompts.append(f"* {method.func.__name__}\n{method.func.__doc__.strip()}")
         return "\n".join(prompts)
+
+    @property
     def store(self) -> "PluginStore":
         return PluginStore(self)
 
