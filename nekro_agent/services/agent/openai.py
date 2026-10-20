@@ -627,6 +627,25 @@ async def gen_openai_chat_response(
             stop_words=stop_words,
         )
 
+    # 4.2.3 轨迹埋点：LLM 调用的模型 / token / 耗时（未启用时零开销）
+    try:
+        from .trace import emit as trace_emit
+
+        trace_emit(
+            "llm_response",
+            "",
+            phase="llm_response",
+            model_name=response.use_model,
+            llm_tokens_in=response.token_input,
+            llm_tokens_out=response.token_output,
+            llm_tokens_total=response.token_consumption,
+            llm_generation_ms=response.generation_time_ms,
+            llm_first_token_ms=response.first_token_cost_ms,
+            llm_message_count=response.message_cnt,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return response
 
 

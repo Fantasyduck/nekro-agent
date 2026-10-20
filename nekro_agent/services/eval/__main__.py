@@ -18,6 +18,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 from .report import write_report as build_report_write
 from .runner import run_suite
@@ -36,10 +37,30 @@ def main(argv=None) -> int:
     parser.add_argument("--no-require-tools", action="store_true", help="不校验工具是否丢失")
     parser.add_argument("--out", default="", help="把 JSON 报告写到指定路径")
     parser.add_argument("--html", default="", help="把 HTML 可视化报表写到指定路径")
+    parser.add_argument("--trace", default="", help="分析行为级 trace（JSONL 路径，默认 DATA_DIR/observer/agent_trace.jsonl）")
     parser.add_argument("--label", default="", help="本次评测的标签（多期对比时用）")
     parser.add_argument("--history", default="", help="历史 JSON 报告目录，用于多期对比")
     parser.add_argument("--json", action="store_true", help="以 JSON 输出到 stdout")
     args = parser.parse_args(argv)
+
+    # 4.2.5 行为级 trace 分析（可选，与 prompt 度量互补）
+    trace_report: Dict[str, Any] = {}
+    if True:  # trace 落盘路径固定，默认分析
+        try:
+            from nekro_agent.core.os_env import OsEnv
+
+            from .trace_analysis import group_turns, load_trace, score_traces
+
+            _tp = args.trace or str(Path(OsEnv.DATA_DIR) / "observer" / "agent_trace.jsonl")
+            _turns = group_turns(load_trace(_tp))
+            trace_report = score_traces(_turns)
+            trace_report["path"] = _tp
+            print("[trace] 轮次 %d，通过 %d，失败 %d（%s）" % (
+                trace_report.get("turns", 0), trace_report.get("passed", 0),
+                trace_report.get("failed", 0), _tp))
+        except Exception as e:  # noqa: BLE001
+            trace_report = {"error": "%s: %s" % (type(e).__name__, e)}
+            print("[trace] 分析失败: " + str(e))
 
     report = run_suite(
         log_dir=args.log_dir or None,
@@ -132,6 +153,9 @@ def main(argv=None) -> int:
         }
         html_path = build_report_write(data, args.html)
         print("HTML 报表已生成: " + html_path)
+
+    if trace_report and not trace_report.get("error"):
+        report["trace"] = trace_report
 
     if args.json:
 

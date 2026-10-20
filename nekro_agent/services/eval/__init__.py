@@ -19,6 +19,7 @@ from .case import EvalCase, load_cases
 from .grader import GradeResult, compare_cases, grade_case
 from .runner import EvalRunner, run_suite
 from .suite import render_report, write_report
+from .trace_analysis import TraceTurn, group_turns, load_trace, score_traces
 
 __all__ = [
     "EvalCase",
@@ -30,4 +31,8 @@ __all__ = [
     "run_suite",
     "render_report",
     "write_report",
+    "TraceTurn",
+    "group_turns",
+    "load_trace",
+    "score_traces",
 ]

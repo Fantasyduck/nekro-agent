@@ -311,6 +311,23 @@ async def run_code_in_sandbox(
         extra_data=SandboxCodeExtData.create_from_llm_response(llm_response, llm_retry_errors=llm_retry_errors).model_dump_json() if llm_response else "",
     )
 
+    # 4.2.4 轨迹埋点：沙盒执行的 stop_type / 耗时 / 输出长度（未启用时零开销）
+    try:
+        from nekro_agent.services.agent.trace import emit as trace_emit
+
+        trace_emit(
+            "sandbox_result",
+            from_chat_key,
+            phase="sandbox_result",
+            sandbox_stop_type=int(stop_type.value),
+            sandbox_exec_ms=exec_time,
+            sandbox_generation_ms=generation_time_ms,
+            sandbox_output_chars=len(output_text or ""),
+            sandbox_code_chars=len(code_run_data.code_content or ""),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     return final_output, output_text, stop_type.value
 
 
