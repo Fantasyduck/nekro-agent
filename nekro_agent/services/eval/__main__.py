@@ -61,8 +61,13 @@ def main(argv=None) -> int:
         snap["label"] = args.label or ("live" if args.live else "static")
         snap["generated_at"] = __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         snap_file = hist_dir / ("eval_" + snap["label"].replace(" ", "_") + ".json")
-        snap_file.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("历史快照已保存: " + str(snap_file))
+        if snap_file.exists():
+            # 已存在则不覆盖：历史快照是人工确认过的基线，
+            # 被当前 eval 结果覆盖会混淆口径（完整 prompt vs 插件段）
+            print("历史快照已存在，保留原值: " + str(snap_file))
+        else:
+            snap_file.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+            print("历史快照已保存: " + str(snap_file))
 
     if args.html:
 
@@ -72,15 +77,26 @@ def main(argv=None) -> int:
         # 历史各期（可选）
         if args.history:
             hist_dir = Path(args.history)
+            _hist = []
             for hp in sorted(hist_dir.glob("eval_*.json")):
                 try:
                     h = json.loads(hp.read_text(encoding="utf-8"))
                 except Exception:
                     continue
-                # 快照是平铺结构（label/avg_*/tool_freq…），直接作为 run
                 if h.get("label"):
-                    runs.append(h)
+                    _hist.append(h)
+            # 按生成时间排序（文件名排序不可靠：中文标签的码序与时间无关）
+            _hist.sort(key=lambda h: str(h.get("generated_at") or ""))
+            # 同标签只保留最后一次，避免与当前期重复
+            _cur_label = args.label or ("live" if args.live else "static")
+            _by_label = {}
+            for h in _hist:
+                _by_label[str(h.get("label"))] = h
+            _cur_snap = _by_label.get(_cur_label)
+            # 历史期（不含当前期标签）
+            runs.extend([h for h in _hist if str(h.get("label")) != _cur_label])
         # 当前期
+
         summary = {
             "label": args.label or ("live" if args.live else "static"),
             "mode": report.get("mode"),
@@ -97,6 +113,15 @@ def main(argv=None) -> int:
             "tool_freq": report.get("tool_freq") or {},
             "results": report.get("results") or [],
         }
+        if _cur_snap:
+            # 同标签已有确认过的快照：以其口径为准（插件段 vs 完整 prompt 不可混用）
+            for _k in ("avg_total_chars", "avg_plugins_segment_chars", "avg_method_count",
+                       "avg_framework_chars", "avg_plugins_chars", "avg_method_chars",
+                       "avg_plugin_ratio", "avg_method_ratio", "tool_freq", "results",
+                       "case_count", "passed", "failed"):
+                if _k in _cur_snap:
+                    summary[_k] = _cur_snap[_k]
+        summary["generated_at"] = _cur_snap.get("generated_at") if _cur_snap else summary.get("generated_at")
         runs.append(summary)
         data = {
             "title": "Nekro Agent Prompt 评测报表",

@@ -104,8 +104,9 @@ class EvalRunner:
                 current = case.system_prompt
                 baseline = case.system_prompt
             else:
-                # 两边都只取插件段（M1 改的就是这一段），保证口径一致
-                current = extract_plugins_segment(current) or current
+                # render_plugins_prompt 返回的**就是**插件段（不含 <plugins> 外层标签），
+                # 所以当前期不能再 extract（会找不到标签而返回空）；
+                # 基线是完整 system prompt，才需要 extract 取出插件段。
                 baseline = extract_plugins_segment(baseline) or baseline
             # 同口径的 full 渲染结果就是「应该存在的工具集合」
             from nekro_agent.services.agent.prompt_metrics import measure_prompt
@@ -266,6 +267,9 @@ def run_suite(
         "passed": sum(1 for r in results if r.passed),
         "failed": sum(1 for r in results if not r.passed),
         "avg_total_chars": round(sum(r.current.total_chars for r in results if r.current) / n, 1),
+        # 插件段与完整 prompt 分开统计：M1 改的是插件段，对比必须同口径
+        "avg_plugins_segment_chars": round(sum(r.current.segment_chars.get("plugins", 0) for r in results if r.current) / n, 1),
+        "baseline_plugins_segment_chars": round(sum(r.baseline.segment_chars.get("plugins", 0) for r in results if r.baseline) / n, 1),
         "avg_method_count": round(method_sum / n, 2),
         "avg_framework_chars": round(fw_sum / n, 1),
         "avg_plugins_chars": round(pl_sum / n, 1),

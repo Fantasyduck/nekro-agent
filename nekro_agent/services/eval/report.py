@@ -228,14 +228,73 @@ def build_report(data: Dict[str, Any]) -> str:
     parts.append(_kpi("插件段占比", _pct(latest.get("avg_plugin_ratio")), "system prompt 内"))
     parts.append("</div>")
 
-    # ---- 多期对比 ----
+    # ---- 改造效果（首期 vs 末期，插件段口径）----
     if n_runs > 1:
-        parts.append('<div class="card"><h2>多期对比（平均 system prompt 体积）</h2>')
-        labels = [r.get("label") or ("run%d" % (i + 1)) for i, r in enumerate(runs)]
-        series_chars = [{"name": "字符数",
-                         "values": [r.get("avg_total_chars") or 0 for r in runs],
+        _seen: Dict[str, Dict[str, Any]] = {}
+        for _r in runs:
+            _seen[str(_r.get("label") or _r.get("mode"))] = _r
+        _uniq = list(_seen.values())
+        _base = _uniq[0]
+        _last = _uniq[-1]
+        _b_seg = _base.get("avg_plugins_segment_chars") or 0
+        _c_seg = _last.get("avg_plugins_segment_chars") or 0
+        _b_tk = _base.get("avg_method_count") or 0
+        _c_tk = _last.get("avg_method_count") or 0
+        _b_mc = _base.get("avg_method_chars") or 0
+        _c_mc = _last.get("avg_method_chars") or 0
+        _d = ((_c_seg - _b_seg) / _b_seg) if _b_seg else 0
+        parts.append('<div class="card"><h2>改造效果对比：' + _esc(_base.get("label") or "基线") + " -> " + _esc(_last.get("label") or "当前") + "</h2>")
+        parts.append('<div class="grid2">')
+        parts.append('<div><div class="note" style="margin-top:0"><b>插件段体积</b>（M1 改造的作用面）</div>')
+        parts.append(_bar_rows(
+            ["基线", "当前"],
+            [{"name": "字符", "values": [_b_seg, _c_seg], "color": PALETTE["s2"]}],
+            unit=" 字符", width=520, row_h=30))
+        parts.append('<div class="note" style="text-align:center;font-size:19px;font-weight:700;letter-spacing:-.4px" class="%s">%s</div>' % (
+            "up" if _d < -0.001 else ("down" if _d > 0.001 else "flat"), _signed(_d)))
+        parts.append("</div>")
+        parts.append('<div><div class="note" style="margin-top:0"><b>工具定义体积</b>（被压缩的部分）</div>')
+        parts.append(_bar_rows(
+            ["基线", "当前"],
+            [{"name": "字符", "values": [_b_mc, _c_mc], "color": PALETTE["s2"]}],
+            unit=" 字符", width=520, row_h=30))
+        parts.append('<div class="note">工具数 <b>%s -> %s</b>（%s）</div>' % (
+            _fmt(_b_tk), _fmt(_c_tk),
+            "一致，未裁掉任何工具" if _b_tk == _c_tk else "有变化，需检查"))
+        parts.append("</div>")
+        parts.append("</div>")
+        parts.append("</div>")
+
+    # ---- 多期对比（插件段口径：M1 改的就是这一段）----
+    if n_runs > 1:
+        # 去重：同一期只保留最后一次（history 里的旧快照会被当前期覆盖）
+        seen: Dict[str, Dict[str, Any]] = {}
+        for r in runs:
+            seen[str(r.get("label") or r.get("mode"))] = r
+        uniq = list(seen.values())
+        parts.append('<div class="card"><h2>多期对比：插件段体积（M1 改造的作用面）</h2>')
+        labels = [r.get("label") or ("run%d" % (i + 1)) for i, r in enumerate(uniq)]
+        series_chars = [{"name": "插件段字符",
+                         "values": [r.get("avg_plugins_segment_chars") or 0 for r in uniq],
                          "color": PALETTE["brand"]}]
         parts.append(_bar_rows(labels, series_chars, unit=" 字符", width=1080, row_h=30))
+        # 逐期降幅
+        if len(uniq) >= 2:
+            base = uniq[0].get("avg_plugins_segment_chars") or 0
+            rows = []
+            for r in uniq[1:]:
+                cur = r.get("avg_plugins_segment_chars") or 0
+                delta = ((cur - base) / base) if base else 0
+                rows.append((r.get("label") or "?", base, cur, delta))
+            parts.append('<table style="margin-top:12px"><thead><tr><th>期次</th><th>插件段基线</th><th>插件段当前</th><th>变化</th><th>工具数</th></tr></thead><tbody>')
+            for lbl, b0, c0, d0 in rows:
+                cls = "up" if d0 < -0.001 else ("down" if d0 > 0.001 else "flat")
+                parts.append("<tr><td>%s</td><td class=\"num\">%s</td><td class=\"num\">%s</td>"
+                             "<td class=\"num %s\">%s</td><td class=\"num\">%s</td></tr>"
+                             % (_esc(lbl), _fmt(b0), _fmt(c0), cls, _signed(d0),
+                                _fmt((uniq[uniq.index(r)]["avg_method_count"]) if r in uniq else 0)))
+            parts.append("</tbody></table>")
+            parts.append('<div class="note">口径说明：对比对象是 <b>&lt;plugins&gt; 段</b>（M1 改造的作用面），两期在<b>同一进程、同一插件状态</b>下渲染，只切换 <code>TOOL_PROMPT_MODE</code>，因此差异只来自工具定义的压缩方式。工具数不变即说明<b>没有工具被裁掉</b>。</div>')
         parts.append("</div>")
 
     # ---- 结构拆解 + 占比 ----

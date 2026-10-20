@@ -67,9 +67,15 @@ def measure_prompt(system_prompt: str, *, rule_markers: Optional[List[str]] = No
     m = PromptMetrics(total_chars=total)
 
     # ---- 段落切分：<plugins> 之前是框架段，之后是插件段
+    # 注意：输入也可能**本身就是**插件段（对比时只取这一段来量），
+    # 此时没有 <plugins> 包裹标签，要靠 <plugin ...> 块识别，否则会被当成纯框架段。
     plugins_idx = text.find("<plugins>")
     if plugins_idx < 0:
-        head, tail = text, ""
+        if "<plugin " in text:
+            # 输入本身是插件段：整段都算插件段，框架段为 0
+            head, tail = "", text
+        else:
+            head, tail = text, ""
     else:
         head, tail = text[:plugins_idx], text[plugins_idx:]
     m.segment_chars["framework"] = len(head)
