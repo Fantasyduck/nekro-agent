@@ -245,6 +245,16 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    EVAL_ENABLED: bool = Field(
+        default=False,
+        title="启用离线评测框架",
+        description="开启后可通过 python -m nekro_agent.services.eval 跑 prompt 回归评测（不调 LLM）。",
+    )
+    EVAL_FIXTURE_DIR: str = Field(
+        default="",
+        title="评测 fixture 目录",
+        description="留空则使用 services/eval/fixtures；也可指向自定义用例目录。",
+    )
     TOOL_PROMPT_MODE: str = Field(
         default="full",
         title="工具提示词渲染模式",

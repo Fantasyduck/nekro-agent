@@ -130,7 +130,14 @@ def load_cases(
     if fixture_dir:
         fdir = Path(fixture_dir)
     else:
-        fdir = Path(__file__).parent / "fixtures"
+        # 允许用配置覆盖；留空则用包内 fixtures
+        try:
+            from nekro_agent.core.config import config as _cfg
+
+            _conf_dir = str(getattr(_cfg, "EVAL_FIXTURE_DIR", "") or "").strip()
+        except Exception:  # noqa: BLE001
+            _conf_dir = ""
+        fdir = Path(_conf_dir) if _conf_dir else Path(__file__).parent / "fixtures"
     if fdir.exists():
         for p in sorted(fdir.glob("*.json")):
             case = _from_fixture(p)
