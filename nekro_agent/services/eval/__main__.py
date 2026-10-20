@@ -136,7 +136,7 @@ def main(argv=None) -> int:
         }
         if _cur_snap:
             # 同标签已有确认过的快照：以其口径为准（插件段 vs 完整 prompt 不可混用）
-            for _k in ("avg_total_chars", "avg_plugins_segment_chars", "avg_method_count",
+            for _k in ("avg_total_chars", "avg_plugins_segment_chars", "avg_full_prompt_chars", "avg_method_count",
                        "avg_framework_chars", "avg_plugins_chars", "avg_method_chars",
                        "avg_plugin_ratio", "avg_method_ratio", "tool_freq", "results",
                        "case_count", "passed", "failed"):

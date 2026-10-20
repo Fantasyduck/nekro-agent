@@ -210,7 +210,15 @@ def build_report(data: Dict[str, Any]) -> str:
         parts.append('<div class="sub">%s%s</div>' % (_esc(sub), ("　·　生成于 " + _esc(gen)) if gen else ""))
 
     # ---- KPI ----
-    avg_chars = latest.get("avg_total_chars") or 0
+    # KPI 用「完整 prompt」口径；插件段口径只在「改造效果」卡片里呈现，避免同页混用
+    _has_full = any(float(r.get("avg_full_prompt_chars") or 0) > 0 for r in runs)
+    # KPI 取**最新一期**的完整 prompt（不对多期求平均，否则两期混合后无意义）
+    avg_chars = (
+        float(latest.get("avg_full_prompt_chars") or 0)
+        if _has_full
+        else (latest.get("avg_total_chars") or 0)
+    )
+    _scope = "完整 system prompt" if _has_full else "插件段"
     parts.append('<div class="kpis">')
     parts.append(_kpi("用例总数", _fmt(latest.get("case_count")), "最新一次评测"))
     parts.append(_kpi("通过 / 失败", "%d / %d" % (latest.get("passed", 0), latest.get("failed", 0)),
@@ -219,13 +227,13 @@ def build_report(data: Dict[str, Any]) -> str:
     if n_runs > 1:
         base_chars = first.get("avg_total_chars") or 0
         delta = ((avg_chars - base_chars) / base_chars) if base_chars else 0
-        parts.append(_kpi("平均 prompt 体积", _fmt(avg_chars), "system prompt 字符",
+        parts.append(_kpi("平均 prompt 体积", _fmt(avg_chars), _scope + " 字符",
                           _signed(delta), _kpi_delta(delta)))
     else:
-        parts.append(_kpi("平均 prompt 体积", _fmt(avg_chars), "system prompt 字符"))
+        parts.append(_kpi("平均 prompt 体积（" + _scope + "）", _fmt(avg_chars), "字符"))
     parts.append(_kpi("平均工具数", "%.1f" % (latest.get("avg_method_count") or 0), "可调用沙盒方法"))
-    parts.append(_kpi("工具定义占比", _pct(latest.get("avg_method_ratio")), "system prompt 内"))
-    parts.append(_kpi("插件段占比", _pct(latest.get("avg_plugin_ratio")), "system prompt 内"))
+    parts.append(_kpi("工具定义占比", _pct(latest.get("avg_method_ratio")), "占 system prompt"))
+    parts.append(_kpi("插件段占比", _pct(latest.get("avg_plugin_ratio")), "占 system prompt"))
     parts.append("</div>")
 
     # ---- 改造效果（首期 vs 末期，插件段口径）----
