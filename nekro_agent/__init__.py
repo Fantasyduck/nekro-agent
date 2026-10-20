@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from nonebot import get_app, get_driver
 from nonebot.adapters.onebot.v11 import Bot
@@ -143,6 +144,23 @@ if _driver is not None:
         logger.info("Built-in commands registered")
 
         await init_plugins()
+
+        # 初始化 Agent 运行轨迹采集（M0：结构化运行事件，供离线 eval 与前端面板消费）
+        try:
+            from nekro_agent.core.config import config as core_config
+            from nekro_agent.core.os_env import OsEnv
+            from nekro_agent.services.agent.trace import configure_trace
+
+            _trace_path = None
+            if core_config.TRACE_PERSIST:
+                _trace_path = str(Path(OsEnv.DATA_DIR) / "observer" / "agent_trace.jsonl")
+            configure_trace(
+                enabled=bool(core_config.TRACE_ENABLED),
+                path=_trace_path,
+                buffer_size=int(core_config.TRACE_BUFFER_SIZE),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Agent 轨迹采集初始化失败（不影响主流程）: {type(e).__name__}: {e}")
 
         # 初始化默认人设（需要在数据库和迁移完成后执行）
         from nekro_agent.services.preset_service import init_default_preset

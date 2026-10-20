@@ -245,6 +245,24 @@ class CoreConfig(ConfigBase):
             ),
         ).model_dump(),
     )
+    TRACE_ENABLED: bool = Field(
+        default=False,
+        title="启用 Agent 运行轨迹采集",
+        description=(
+            "在 agent 主循环中记录结构化运行事件（prompt 度量 / 阶段 / 耗时），"
+            "用于评估 prompt 组装等改造是否真的变好。关闭时零开销。"
+        ),
+    )
+    TRACE_PERSIST: bool = Field(
+        default=False,
+        title="轨迹落盘为 JSONL",
+        description="开启后把轨迹事件追加写入 observer/agent_trace.jsonl，便于离线分析。",
+    )
+    TRACE_BUFFER_SIZE: int = Field(
+        default=2000,
+        title="轨迹内存缓冲条数",
+        description="内存中保留的最近事件数上限，超出自动丢弃最旧的（防内存泄漏）。",
+    )
     MAX_UPLOAD_SIZE_MB: int = Field(
         default=10,
         title="上传文件大小限制 (MB)",

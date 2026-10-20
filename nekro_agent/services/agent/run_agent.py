@@ -20,10 +20,12 @@ from nekro_agent.services.sandbox.runner import limited_run_code
 
 from .creator import OpenAIChatMessage
 from .openai import OpenAIResponse, gen_openai_chat_response
+from .prompt_metrics import measure_prompt
 from .resolver import ParsedCodeRunData, parse_chat_response
 from .templates.compiler import PromptCompiler
 from .templates.history import render_history_data
 from .templates.plugin import render_plugins_prompt
+from .trace import emit as trace_emit
 
 # 使用deque保存最近100条错误日志路径
 
@@ -100,6 +102,22 @@ async def run_agent(
         sandbox_stop_type: Optional[int] = None,
         error_summary: Optional[str] = None,
     ) -> None:
+        # 轨迹采集：与状态广播同源，零侵入（未启用时只是一次布尔判断）
+        try:
+            trace_emit(
+                "runtime_state",
+                chat_key,
+                phase=phase,
+                iteration_index=iteration_index,
+                iteration_total=iteration_total,
+                llm_retry_index=llm_retry_index,
+                llm_retry_total=llm_retry_total,
+                model_name=model_name,
+                sandbox_stop_type=sandbox_stop_type,
+                error_summary=error_summary,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[run_agent] {chat_key} | 轨迹记录失败: {e}")
         try:
             await publish_system_event(
                 AgentRuntimeStatusEvent(
@@ -148,6 +166,26 @@ async def run_agent(
             model_group=used_model_group,
         ),
     )
+
+    # 轨迹：prompt 组装度量（与离线 eval 共用同一套度量代码）
+    try:
+        _sys_text = messages[0].content if messages else ""
+        if isinstance(_sys_text, list):
+            _sys_text = "\n".join(
+                str(b.get("text") or "") for b in _sys_text if isinstance(b, dict)
+            )
+        _pm = measure_prompt(str(_sys_text or ""))
+        trace_emit(
+            "prompt_built",
+            chat_key,
+            phase="prompt_built",
+            iteration_index=1,
+            model_name=used_model_group.CHAT_MODEL,
+            prompt_metrics=_pm.to_dict(),
+            message_count=len(messages),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[run_agent] {chat_key} | prompt 度量失败: {e}")
 
     logger.debug(f"[run_agent] {chat_key} | 历史记录渲染完成，发送 LLM 请求 (model={used_model_group.CHAT_MODEL})")
     history_render_until_time = time.time()
