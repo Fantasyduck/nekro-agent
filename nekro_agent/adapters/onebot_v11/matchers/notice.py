@@ -241,6 +241,14 @@ notice_matcher: Type[Matcher] = on_notice(priority=99999, block=False)
 async def _(_: Matcher, event: NoticeEvent, bot: Bot):
     from nekro_agent.adapters.onebot_v11.adapter import OnebotV11Adapter
 
+    if (
+        getattr(event, "notice_type", "") == "notify"
+        and getattr(event, "sub_type", "") == "poke"
+        and str(getattr(event, "user_id", "")) == str(bot.self_id)
+    ):
+        logger.info(f"忽略机器人自身回戳通知: self_id={bot.self_id}")
+        return
+
     # 处理通知事件
     chat_key, chat_type = await get_chat_info_old(event=event)
     db_chat_channel: DBChatChannel = await DBChatChannel.get_channel(chat_key=chat_key)
@@ -309,7 +317,7 @@ async def _(_: Matcher, event: NoticeEvent, bot: Bot):
                 1
                 if (
                     handler.config.force_tome
-                    or (isinstance(handler, PokeNoticeHandler) and info["target_id"] == adapter.config.BOT_QQ)
+                    or (isinstance(handler, PokeNoticeHandler) and info["target_id"] == str(bot.self_id))
                 )
                 else 0
             ),

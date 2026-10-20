@@ -194,3 +194,6 @@ nekro_cc_sandbox
 
 # .codex
 .codex
+# 本地工具产物
+.codegraph/
+.archify/

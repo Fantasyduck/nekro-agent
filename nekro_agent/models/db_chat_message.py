@@ -48,7 +48,9 @@ class DBChatMessage(Model):
     class Meta:  # type: ignore
         table = "chat_message"
 
-    def parse_chat_history_prompt(self, one_time_code: str, config: "CoreConfig", ref_mode: bool = False) -> str:
+    def parse_chat_history_prompt(
+        self, one_time_code: str, config: "CoreConfig", ref_mode: bool = False, bot_platform_id: str = "",
+    ) -> str:
         """解析聊天历史记录生成提示词"""
         content = convert_raw_msg_data_json_to_msg_prompt(self.content_data, one_time_code, config, ref_mode)
         content = limited_text_output(content, config.AI_CONTEXT_LENGTH_PER_MESSAGE, placeholder="(content too long, omitted)")
@@ -60,14 +62,17 @@ class DBChatMessage(Model):
         # tome 标记：仅在群聊中、非 Bot/系统消息、且明确指向当前 Bot 时输出
         # sender_id 以字符串形式存储，"-1" 表示 Bot/系统消息
         is_group_chat: bool = self.chat_type not in ("private", "c2c")
-        is_bot_message: bool = str(self.sender_id) == "-1"
+        is_bot_message: bool = str(self.sender_id) == "-1" or bool(
+            bot_platform_id and str(self.platform_userid) == bot_platform_id
+        )
         tome_str: str = (
             "tome:true"
             if config.AI_INCLUDE_TOME_INDICATOR and is_group_chat and not is_bot_message and self.is_tome
             else ""
         )
 
-        parts: List[str] = [p for p in [additional_info, ref_str, tome_str] if p]
+        role = "system" if self.is_system else "assistant" if is_bot_message else "user"
+        parts: List[str] = [p for p in [additional_info, ref_str, tome_str, f"role:{role}"] if p]
         prefix_str: str = f"({', '.join(parts)})" if parts else ""
 
         return f'{prefix_str}[{time_str} id:{self.platform_userid}] "{self.sender_nickname}" 说: {content or self.content_text}'
@@ -79,7 +84,7 @@ class DBChatMessage(Model):
     @property
     def is_system(self) -> bool:
         """是否为系统消息"""
-        return self.sender_id == -1
+        return str(self.sender_id) == "-1" and str(self.platform_userid) == "0"
 
     @property
     def ext_data_obj(self) -> PlatformMessageExt:

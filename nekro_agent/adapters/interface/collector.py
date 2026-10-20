@@ -28,6 +28,10 @@ async def collect_message(
 ) -> None:
     """适配器消息收集器"""
 
+    if platform_message.is_self:
+        logger.info(f"跳过自身消息: adapter={adapter.key}, message_id={platform_message.message_id}")
+        return
+
     try:
         chat_key = adapter.build_chat_key(platform_channel.channel_id)
     except Exception:
@@ -91,10 +95,6 @@ async def collect_message(
 
     if not user.is_active:
         logger.info(f"用户 {platform_user.user_id} 被封禁，封禁结束时间: {user.ban_until}")
-        return
-
-    if platform_message.is_self:
-        logger.info(f'接收自身消息 "{platform_message.content_text}"，跳过...')
         return
 
     chat_message: ChatMessage = _build_chat_message(adapter, chat_key, platform_channel, platform_user, platform_message)

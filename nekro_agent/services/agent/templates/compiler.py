@@ -5,6 +5,7 @@ from jinja2 import Environment
 
 from nekro_agent.core.config import CoreConfig, ModelConfigGroup
 from nekro_agent.models.db_chat_channel import DBChatChannel
+from nekro_agent.schemas.chat_message import ChatMessage
 
 from ..creator import OpenAIChatMessage
 from .base import env as default_env
@@ -137,6 +138,7 @@ class PromptCompiler:
         one_time_code: str,
         config: CoreConfig,
         model_group: ModelConfigGroup,
+        trigger_message: Optional[ChatMessage] = None,
     ) -> OpenAIChatMessage:
         return OpenAIChatMessage.from_template("user", HistoryFirstStart(enable_cot=self.enable_cot), default_env).extend(
             await render_history_data(
@@ -146,5 +148,7 @@ class PromptCompiler:
                 plugin_injected_prompt=self.plugins_runtime_prompt,
                 model_group=model_group,
                 config=config,
+                bot_platform_id=self.bot_platform_id,
+                trigger_message=trigger_message,
             ),
         )

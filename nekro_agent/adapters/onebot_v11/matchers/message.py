@@ -53,6 +53,10 @@ def register_matcher(adapter: BaseAdapter):
     async def _(_: Matcher, event: Union[MessageEvent, GroupMessageEvent], bot: Bot):
         """消息匹配器"""
 
+        if str(event.user_id) == str(bot.self_id) or event.post_type == "message_sent":
+            logger.info(f"忽略机器人自身消息: self_id={bot.self_id}, message_id={event.message_id}")
+            return
+
         # 频道信息处理
         channel_id, chat_type = await get_chat_info(event=event)
         plt_channel: PlatformChannel = PlatformChannel(channel_id=channel_id, channel_name="", channel_type=chat_type)
