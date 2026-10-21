@@ -95,10 +95,29 @@
 全量回归：461 passed / 2 skipped / 2 failed（失败仍是既有的 `test_plugin_call_priority`
 与 `test_tool_result_continuation`）。
 
-## 6. 还没做的部分
+## 6. 兼容投影追平（回滚第 4 步）
 
-- **兼容投影追平**：回滚第 4 步要求把灰度期间的事实更新、删除、授权变更重放到旧兼容投影。
-  目前 `legacy_fact_write` 只是拒绝写入，并没有「从权威事实反向生成旧表投影」的单向同步器；
+回滚第 4 步要求把灰度期间的事实更新、删除与授权变更重放到旧兼容投影。
+实现放在插件侧：`nekro_memory_angel/projection.py`（插件仓库 `docs/projection.md`）。
+
+为什么必须在插件侧：兼容投影是天使插件的 SQLite 旧表，核心不 import 插件，
+只能由插件读权威事实再写回自己的表。核心负责提供权威读取路径与管理端点。
+
+| 环节 | 行为 |
+| --- | --- |
+| 触发条件 | 只处理 `pipeline_mode=service` 的 scope；`shadow` / `legacy_guarded` 阶段旧表仍是权威，跳过以避免双写 |
+| 定位旧行 | 经 `mem_legacy_map` 的 `assertion_id → legacy_id` 绑定，原地更新同一行 |
+| 删除传播 | 断言不再是 `active`（遗忘、取代）时删除对应旧行，保证回滚后不复活已遗忘内容 |
+| 分类 | `memory.note` + `title` → notes；`memory.note` 无 title → memories；其它谓词 → facts |
+| 调度 | 插件维护任务按 `MAINTENANCE_INTERVAL_HOURS` 节流，`ENABLE_LEGACY_PROJECTION` 可关闭 |
+| 手动入口 | 插件面板 `GET /projection/status`、`POST /projection/sync`（支持 `dry_run`） |
+
+因此「先追平再放开旧路径」现在有可执行动作：切回 `legacy_guarded` 后，
+先 `POST /projection/sync?chat_key=...&dry_run=true` 看计数，再实跑一次，确认 `removed`
+覆盖了灰度期遗忘数量，才允许旧路径对外服务。
+
+## 7. 还没做的部分
+
 - **备份与恢复演练**：设计 §17.2 要求 PostgreSQL 一致性备份 + SQLite backup API，
   并验证「先重放控制记录再开放读取」；
 - **合成评测与 p95／费用观测**：Canary 转 Unified 的前置证据，属于运营指标，代码未采。
