@@ -102,6 +102,11 @@ class MemoryService:
             if context.purpose != "extract" and not context.is_admin and speaker != context.actor_key:
                 raise MemoryError("SCOPE_DENIED")
             now = datetime.fromtimestamp(message.send_timestamp, tz=timezone.utc)
+        elif source.kind == "legacy_import":
+            # 旧库记录没有可复核的消息锚点，只能以管理员身份导入并标记未核实；
+            # 来源标识固定为 legacy:<表>:<旧编号>，重复导入命中同一观察行。
+            if not context.is_admin or context.purpose != "admin_review":
+                raise MemoryError("SCOPE_DENIED")
         elif not context.is_admin:
             raise MemoryError("SCOPE_DENIED")
         observation, _ = await DBMemObservation.get_or_create(
@@ -156,6 +161,8 @@ class MemoryService:
             now = datetime.now(timezone.utc)
             valid_from = proposal.valid_from or source.observed_at
             manual = proposal.source.kind == "admin_edit" and context.is_admin
+            # 旧库导入没有可复核证据，按设计标为 legacy_unverified：正常参与召回，但不冒充已核实。
+            legacy = proposal.source.kind == "legacy_import" and context.is_admin
             newer_source_exists = False
             if current is not None and not manual:
                 current_source_ids = await DBMemAssertionEvidence.filter(
@@ -177,6 +184,9 @@ class MemoryService:
                 or current is not None and valid_from < current.valid_from
                 or newer_source_exists
             )
+            if legacy:
+                # 导入的历史事实没有等待确认的对象，直接生效更符合「保留旧数据」的预期。
+                pending = False
             same_value = current is not None and _digest(current.value_json["value"]) == _digest(proposal.value)
             if same_value and not pending:
                 assertion = current
@@ -191,7 +201,7 @@ class MemoryService:
                     confidence=proposal.confidence,
                     min_favor=proposal.min_favor if manual or current is None else max(current.min_favor, proposal.min_favor),
                     verification_status=(
-                        "manual_admin" if manual else "user_declared"
+                        "manual_admin" if manual else "legacy_unverified" if legacy else "user_declared"
                         if proposal.subject_key == source.speaker_key else "third_party"
                     ),
                     valid_from=valid_from, supersedes_id=current.id if current and not pending else None,
@@ -267,6 +277,9 @@ class MemoryService:
                 ).first()
                 if message is None or message_revision(message) != observation.source_revision:
                     continue
+            elif observation.source_kind == "legacy_import":
+                # 旧库导入没有可复核来源；存在性由 mem_legacy_map 与导入批次记录保证。
+                pass
             elif observation.source_kind != "admin_edit":
                 continue
             refs.append(SourceRef(kind=observation.source_kind, id=observation.source_id, revision=observation.source_revision))

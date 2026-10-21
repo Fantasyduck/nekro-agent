@@ -154,6 +154,119 @@ async def test_legacy_short_id_mapping_roundtrip() -> None:
     assert await tool_facade.resolve_legacy_mapping(legacy_id="8") is None
 
 
+async def test_legacy_import_is_active_but_marked_unverified() -> None:
+    await activate()
+    await proposal("tea")
+    result = await tool_facade.import_legacy_fact(
+        chat_key="private_alice", actor_key="import:legacy",
+        subject_key=tool_facade.normalize_subject("onebot_v11", "alice"),
+        predicate="drink", value="oolong", legacy_table="facts", legacy_id="41",
+    )
+    row = await DBMemAssertion.get(id=result.assertion_id)
+    # 旧库没有消息锚点，只能标记未核实，但不能因此落成待确认而不可见。
+    assert row.status == "active" and result.action == "created"
+    assert row.verification_status == "legacy_unverified"
+    assert await tool_facade.resolve_legacy_mapping(legacy_id="41") == result.assertion_id
+
+
+async def test_legacy_import_is_recallable_and_keeps_its_source() -> None:
+    from test_memory_fact_service import context
+
+    from nekro_agent.services.memory.service import MemoryService
+
+    await activate()
+    await proposal("tea")
+    await tool_facade.import_legacy_fact(
+        chat_key="private_alice", actor_key="import:legacy",
+        subject_key=tool_facade.normalize_subject("onebot_v11", "alice"),
+        predicate="drink", value="oolong", legacy_table="facts", legacy_id="42",
+    )
+    bundle = await MemoryService().recall(context(purpose="answer"), subject_key="onebot_v11:alice", limit=10)
+    values = [item.value for item in bundle.items]
+    assert "oolong" in values
+    imported = next(item for item in bundle.items if item.value == "oolong")
+    assert imported.verification_status == "legacy_unverified"
+    assert [ref.kind for ref in imported.source_refs] == ["legacy_import"]
+
+
+async def test_legacy_import_rerun_is_idempotent_and_tracks_checksum() -> None:
+    await activate()
+    await proposal("tea")
+    kwargs = dict(
+        chat_key="private_alice", actor_key="import:legacy",
+        subject_key=tool_facade.normalize_subject("onebot_v11", "alice"),
+        predicate="drink", legacy_table="facts", legacy_id="43",
+    )
+    first = await tool_facade.import_legacy_fact(value="oolong", **kwargs)
+    again = await tool_facade.import_legacy_fact(value="oolong", **kwargs)
+    # 同一批次重跑只命中幂等槽，不产生新版本，也不能把映射改成 reimported。
+    assert again.assertion_id == first.assertion_id
+    assert await DBMemAssertion.filter(predicate="drink").count() == 1
+    mapping = await tool_facade.import_legacy_fact(value="puer", **kwargs)
+    assert mapping.assertion_id != first.assertion_id
+    assert await DBMemAssertion.filter(predicate="drink", status="active").count() == 1
+    from nekro_agent.models.db_mem_fact import DBMemLegacyMap
+
+    row = await DBMemLegacyMap.filter(legacy_table="facts", legacy_id="43").get()
+    assert row.import_status == "reimported" and row.assertion_id == mapping.assertion_id
+
+
+async def test_legacy_import_requires_admin_review_context() -> None:
+    from test_memory_fact_service import context
+
+    from nekro_agent.services.memory.contracts import FactProposal, SourceRef
+    from nekro_agent.services.memory.service import MemoryService
+
+    await activate()
+    with pytest.raises(MemoryError, match="SCOPE_DENIED"):
+        await MemoryService().propose_fact(
+            context(purpose="answer"),
+            FactProposal(
+                subject_key="onebot_v11:alice", predicate="drink", value="oolong", confidence=0.8,
+                source=SourceRef(kind="legacy_import", id="legacy:facts:44", revision="c" * 32),
+            ),
+            idempotency_key="legacy-answer-context",
+        )
+
+
+async def test_legacy_memories_keep_distinct_rows_and_note_metadata() -> None:
+    """迁移不能把多条旧记忆压成一条：笔记谓词是多值，且 value 信封要完整保留。"""
+    await activate()
+    await proposal("tea")
+    first = await tool_facade.import_legacy_fact(
+        chat_key="private_alice", actor_key="import:legacy",
+        subject_key=tool_facade.normalize_subject("onebot_v11", "alice"),
+        predicate=tool_facade.NOTE_PREDICATE,
+        value={"text": "喜欢乌龙茶", "tags": ["饮食"], "importance": 0.9, "memory_type": "preference",
+               "scope": "channel", "origin": "legacy_import", "legacy_table": "memories", "legacy_short_id": 12},
+        legacy_table="memories", legacy_id="m-1", confidence=0.85,
+    )
+    second = await tool_facade.import_legacy_fact(
+        chat_key="private_alice", actor_key="import:legacy",
+        subject_key=tool_facade.normalize_subject("onebot_v11", "alice"),
+        predicate=tool_facade.NOTE_PREDICATE,
+        value={"title": "设定集", "text": "正文", "tags": [], "importance": 0.8, "memory_type": "semantic",
+               "scope": "channel", "origin": "legacy_import", "legacy_table": "notes", "legacy_short_id": 3},
+        legacy_table="notes", legacy_id="n-1", confidence=0.85,
+    )
+    assert first.assertion_id != second.assertion_id
+    notes = await DBMemAssertion.filter(predicate=tool_facade.NOTE_PREDICATE, status="active")
+    assert len(notes) == 2
+    # 短号与行 id 都可解析回同一断言，面板旧链接不会失效。
+    assert await tool_facade.resolve_legacy_mapping(legacy_id="m-1", legacy_table="memories") == first.assertion_id
+    assert await tool_facade.resolve_legacy_mapping(legacy_id="n-1", legacy_table="notes") == second.assertion_id
+
+
+async def test_legacy_import_rejects_unknown_table() -> None:
+    await activate()
+    await proposal("tea")
+    with pytest.raises(MemoryError, match="LEGACY_TABLE_INVALID"):
+        await tool_facade.import_legacy_fact(
+            chat_key="private_alice", actor_key="import:legacy", subject_key="onebot_v11:alice",
+            predicate="drink", value="tea", legacy_table="profiles", legacy_id="p-1",
+        )
+
+
 async def test_tool_entry_refuses_channels_without_unified_pipeline() -> None:
     await proposal("tea")
     with pytest.raises(MemoryError, match="PIPELINE_DISABLED"):

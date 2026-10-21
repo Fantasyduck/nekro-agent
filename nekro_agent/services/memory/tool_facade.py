@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
+from nekro_agent.core.config import config
+from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_mem_fact import DBMemLegacyMap
 from nekro_agent.services.memory.contracts import (
@@ -257,6 +259,59 @@ async def admin_correct_fact(
         expected_row_revision=expected_row_revision,
         reason=reason,
     )
+
+
+async def import_legacy_fact(
+    *, chat_key: str, actor_key: str, subject_key: str, predicate: str, value: Any,
+    legacy_table: str, legacy_id: str, confidence: float = 0.8, min_favor: int = 0, checksum: str = "",
+) -> ResolutionResult:
+    """把旧 SQLite 记录导入权威事实，并登记旧编号映射。
+
+    旧库记录没有可复核的消息锚点，因此以管理员身份写入、标为 legacy_unverified，
+    正常参与召回但不冒充已核实。幂等键包含旧表与旧编号，重跑同一批次不会多出新版本；
+    checksum 变化时仍会写入新版本，同时把映射标记为 reimported 便于对账。
+    """
+    if legacy_table not in {"memories", "notes", "facts"}:
+        raise MemoryError("LEGACY_TABLE_INVALID")
+    legacy_id = str(legacy_id).strip()
+    if not legacy_id:
+        raise MemoryError("LEGACY_ID_INVALID")
+    body = digest(value)
+    effective_checksum = (checksum or body)[:64]
+    channel = await DBChatChannel.filter(chat_key=chat_key).first()
+    if channel is None or channel.workspace_id is None:
+        raise MemoryError("SCOPE_UNRESOLVED")
+    context = RequestContext(
+        workspace_id=channel.workspace_id, agent_id=config.MEMORY_FACT_AGENT_ID,
+        actor_key=actor_key, chat_key=chat_key, purpose="admin_review", is_admin=True,
+    )
+    proposal = FactProposal(
+        subject_key=subject_key, predicate=predicate, value=value,
+        confidence=confidence, min_favor=min_favor,
+        source=SourceRef(
+            kind="legacy_import",
+            id=f"legacy:{legacy_table}:{legacy_id}"[:256],
+            revision=effective_checksum,
+        ),
+    )
+    result = await service().propose_fact(
+        context, proposal,
+        idempotency_key=f"legacy:{legacy_table}:{legacy_id}:{effective_checksum[:16]}",
+    )
+    previous = await DBMemLegacyMap.filter(
+        legacy_store=LEGACY_STORE, legacy_table=legacy_table, legacy_id=legacy_id,
+    ).first()
+    if previous is None:
+        await record_legacy_mapping(
+            legacy_id=legacy_id, assertion_id=result.assertion_id,
+            legacy_table=legacy_table, checksum=effective_checksum,
+        )
+    elif previous.checksum != effective_checksum:
+        previous.assertion_id = result.assertion_id
+        previous.checksum = effective_checksum
+        previous.import_status = "reimported"
+        await previous.save(update_fields=["assertion_id", "checksum", "import_status"])
+    return result
 
 
 async def record_legacy_mapping(

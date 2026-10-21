@@ -36,7 +36,7 @@ class RequestContext(BaseModel):
 
 class SourceRef(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    kind: Literal["message", "admin_edit"]
+    kind: Literal["message", "admin_edit", "legacy_import"]
     id: str = Field(min_length=1, max_length=256)
     revision: str = Field(min_length=1, max_length=64)
 
