@@ -69,7 +69,7 @@ get_relationship_source() -> (provider, validator)
 
 ## 测试
 
-- 插件：`tests/test_relationship_source.py` 13 项纯逻辑测试（revision 稳定性与变化检测、
+- 插件：`tests/test_relationship_source.py` 15 项纯逻辑测试（revision 稳定性与变化检测、
   受众过滤、共享读取失败降级、渲染四行且不含成员清单、注册标签、复核在状态变化／越权事件／
   配置关闭时拒绝、来源撤回剔除、聚合状态依赖受众外证据时整层降级）；
   `work\run-plugin-tests.ps1` → 54 passed。
