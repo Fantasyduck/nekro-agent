@@ -43,6 +43,8 @@ get_relationship_source() -> (provider, validator)
 | 当前对象 | `DBChatMessage.filter(chat_key, is_recalled=False).exclude(sender_id="-1").order_by("-id")` 取最近一条真实用户消息 |
 | 受众 | `{chat_key} ∪ sharing.members_of(chat_key, "share_memory")`；共享配置读不到时降级为仅本会话 |
 | 事件过滤 | 事件的 `source_chat_key`（即 `origin_chat_key`）不在受众内、或来源为空，直接丢弃 |
+| 来源撤回 | 事件登记 `source_ids_json`；来源消息被撤回或已不存在时，该事件从证据集剔除，revision 随之变化 |
+| 聚合状态门控 | 阶段、分数、权重是按共享组聚合的结果，明细过滤挡不住它们：只要档案仍压着一条受众之外的证据（`storage.count_foreign_favor_events`），整层按中性处理，不输出任何关系行 |
 | 片段文本 | 四行固定结构（长期关系说明／当前对象／关系阶段／互动基调）+ 关系刻度 + 稳定印象 + 标签 + 最近事件 + 边界提示 |
 | revision | `sha256` 摘要 user_id、stage、score、权重、event_count、updated_at、summary、interaction_hint、tags 与可见事件；任一变化即换新值 |
 | 复核 | 从 `source_refs` 里的 `favor:<user_id>` 取回装配时的对象，重算受众与状态，比对 revision |
@@ -56,16 +58,21 @@ get_relationship_source() -> (provider, validator)
 
 ## 仍然待办
 
-- 关系事件的跨库订阅：`mem_domain_outbox` 产生的 `fact.*` 事件还没有消费者确认，
-  关系侧也尚未按事实撤回／来源删除触发依赖重算。
-- 共享组变更后的失效：`storage.configure_relation_sharing` 会重算归并，但已生成的片段
-  依赖发送前复核兜底，没有主动失效通知。
+- 关系事件的跨库订阅：`mem_domain_outbox` 产生的 `fact.*` 事件还没有消费者确认。
+  这是**有条件延后**，不是遗漏——outbox 目前只写 `event_type`／`aggregate_id`／
+  `aggregate_revision`／`{"schema_version": 1}`，不带事实正文与主体；而关系事件眼下全部
+  由消息证据产生（`engine.py:808-900` 用 24 小时内真实消息逐字核验），事实派生的关系效果
+  还没有映射规则（设计 §11.8 / detailed-design:203 要求同效果共用稳定 `effect_key`）。
+  在没有可应用效果之前启动订阅循环，只会产生空转投递。
+- 共享组变更后的失效通知：`storage.configure_relation_sharing` 会重算归并，读门已能按
+  「受众外证据」当场降级，但尚无主动失效推送；现有兜底是发送前复核 + 每次装配重新判定。
 
 ## 测试
 
-- 插件：`tests/test_relationship_source.py` 10 项纯逻辑测试（revision 稳定性与变化检测、
+- 插件：`tests/test_relationship_source.py` 13 项纯逻辑测试（revision 稳定性与变化检测、
   受众过滤、共享读取失败降级、渲染四行且不含成员清单、注册标签、复核在状态变化／越权事件／
-  配置关闭时拒绝）；`work\run-plugin-tests.ps1` → 49 passed。
+  配置关闭时拒绝、来源撤回剔除、聚合状态依赖受众外证据时整层降级）；
+  `work\run-plugin-tests.ps1` → 54 passed。
 - 核心：`tests/test_memory_context_builder.py:113-146` 已覆盖注册表路径
   （注册后 build 生效、非法回调被拒、provider 失败走中性上下文）；全量
   `work\run-memory-postgres-tests.ps1 /workspace/tests` → 440 passed / 2 skipped / 2 既有失败。
