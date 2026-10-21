@@ -439,6 +439,42 @@ class MemoryService:
             purged += 1
         return purged
 
+    async def retention_status(self, context: RequestContext) -> dict[str, int]:
+        """清理进度概览：只看数量，不返回任何正文，供运维判断是否需要干预。"""
+        if not context.is_admin or context.purpose != "admin_review":
+            raise MemoryError("SCOPE_DENIED")
+        scopes = [scope.id for scope in await self._visible_scopes(context)]
+        deleted = DBMemAssertion.filter(scope_id__in=scopes, status=FactStatus.DELETED)
+        total_deleted = await deleted.count()
+        purged = 0
+        purged_ids: list[UUID] = []
+        async for row in deleted:
+            if isinstance(row.value_json, dict) and row.value_json.get("purged") is True:
+                purged += 1
+                purged_ids.append(row.id)
+        due = 0
+        if self._purge_enabled():
+            deadline = datetime.now(timezone.utc) - timedelta(days=int(config.MEMORY_FACT_PURGE_AFTER_DAYS))
+            async for row in deleted:
+                if row.id in purged_ids:
+                    continue
+                stamps = await self._deleted_at([row.id])
+                if stamps and min(stamps) <= deadline:
+                    due += 1
+        assertion_ids = list(await DBMemAssertion.filter(scope_id__in=scopes).values_list("id", flat=True))
+        return {
+            "deleted_assertions": total_deleted,
+            "purged_assertions": purged,
+            "pending_purge": max(0, total_deleted - purged),
+            "due_for_purge": due,
+            "index_pending": await DBMemIndexOutbox.filter(
+                assertion_id__in=assertion_ids, state__in=["pending", "running"],
+            ).count(),
+            "index_dead_letter": await DBMemIndexOutbox.filter(
+                assertion_id__in=assertion_ids, state="dead_letter",
+            ).count(),
+        }
+
     async def grant_scope(
         self, context: RequestContext, *, audience_chat_key: str, valid_until: datetime | None = None,
     ) -> UUID:

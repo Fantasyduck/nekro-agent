@@ -139,3 +139,75 @@ async def test_dead_letter_rejects_unknown_kind_and_outside_scope() -> None:
         await DeadLetterAdmin(context=mismatched).list(kind="index")
     with pytest.raises(MemoryError, match="SCOPE_DENIED"):
         DeadLetterAdmin(context=base_context())
+
+async def test_retention_status_counts_shrink_after_purge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "MEMORY_FACT_PURGE_AFTER_DAYS", 7)
+    service = MemoryService()
+    result = await service.propose_fact(base_context(), await proposal("tea"), idempotency_key="first")
+
+    before = await service.retention_status(admin_context())
+    assert before["deleted_assertions"] == 0 and before["due_for_purge"] == 0
+
+    await service.forget(admin_context(), result.assertion_id)
+    after_forget = await service.retention_status(admin_context())
+    assert after_forget["deleted_assertions"] == 1
+    assert after_forget["purged_assertions"] == 0
+    assert after_forget["pending_purge"] == 1
+    # 保留期未到，还不能算「到期」。
+    assert after_forget["due_for_purge"] == 0
+    # 遗忘同时排队了索引撤除，进度里必须能看出来。
+    assert after_forget["index_pending"] >= 1
+
+    old = datetime.now(timezone.utc) - timedelta(days=30)
+    await DBMemAuditEvent.filter(target_id=result.assertion_id, operation="deleted").update(created_at=old)
+    assert (await service.retention_status(admin_context()))["due_for_purge"] == 1
+
+    await service.purge_forgotten(admin_context())
+    after_purge = await service.retention_status(admin_context())
+    assert after_purge["purged_assertions"] == 1
+    assert after_purge["pending_purge"] == 0
+    # 清理只清正文，行与审计仍在，所以总数不变。
+    assert after_purge["deleted_assertions"] == 1
+
+
+async def test_retention_status_requires_admin_review() -> None:
+    with pytest.raises(MemoryError, match="SCOPE_DENIED"):
+        await MemoryService().retention_status(base_context())
+
+
+async def test_purge_stale_fact_collections_never_deletes_current(monkeypatch: pytest.MonkeyPatch) -> None:
+    from nekro_agent.services.memory import fact_index
+
+    deleted: list[str] = []
+
+    class _FakeClient:
+        async def get_collections(self):
+            class _Item:
+                def __init__(self, name: str) -> None:
+                    self.name = name
+
+            # 混入一个段落库名字，验证不会被误删。
+            return [_Item("nekro_facts_v1_old"), _Item("nekro_facts_v1_current"), _Item("nekro_paragraphs_v1_x")]
+
+        async def get_collection(self, name: str):
+            raise RuntimeError("count unavailable")
+
+        async def delete_collection(self, name: str) -> None:
+            deleted.append(name)
+
+    async def _fake_client():
+        return _FakeClient()
+
+    monkeypatch.setattr(fact_index, "get_qdrant_client", _fake_client)
+    monkeypatch.setattr(fact_index, "_configuration_identity", lambda: "current")
+
+    infos = await fact_index.list_fact_collections()
+    by_name = {info.name: info for info in infos}
+    assert set(by_name) == {"nekro_facts_v1_old", "nekro_facts_v1_current"}
+    assert by_name["nekro_facts_v1_current"].current is True
+    # 读不到计数时不能谎报 0。
+    assert by_name["nekro_facts_v1_current"].points is None
+
+    removed = await fact_index.purge_stale_fact_collections()
+    assert removed == ["nekro_facts_v1_old"]
+    assert deleted == ["nekro_facts_v1_old"]

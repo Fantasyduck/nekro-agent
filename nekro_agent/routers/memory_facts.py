@@ -33,6 +33,11 @@ from nekro_agent.services.memory.contracts import (
     ScopeGrantRecord,
 )
 from nekro_agent.services.memory.dead_letter import DeadLetterAdmin, DeadLetterPage
+from nekro_agent.services.memory.fact_index import (
+    FactCollectionInfo,
+    list_fact_collections,
+    purge_stale_fact_collections,
+)
 from nekro_agent.services.memory.feature_flags import MemoryOperation, ensure_memory_system_enabled
 from nekro_agent.services.memory.service import MemoryService
 from nekro_agent.services.user.deps import get_current_active_user
@@ -105,6 +110,21 @@ class _PurgeBody(BaseModel):
 
 class _PurgeResult(BaseModel):
     purged: int
+
+
+class _RetentionOverview(BaseModel):
+    deleted_assertions: int
+    purged_assertions: int
+    pending_purge: int
+    due_for_purge: int
+    index_pending: int
+    index_dead_letter: int
+    purge_enabled: bool
+    collections: list[FactCollectionInfo]
+
+
+class _CollectionPurgeResult(BaseModel):
+    removed: list[str]
 
 
 def _admin_context(*, workspace_id: int, chat_key: str, username: str) -> RequestContext:
@@ -273,6 +293,41 @@ async def purge_memory_facts(
     context = _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
     purged = await _call(MemoryService().purge_forgotten(context, limit=body.limit))
     return _PurgeResult(purged=purged)
+
+
+@router.get("/retention", summary="查看遗忘清理进度与事实索引 collection", response_model=_RetentionOverview)
+@require_role(Role.Admin)
+async def read_retention_overview(
+    workspace_id: int = Query(..., gt=0),
+    chat_key: str = Query(..., min_length=1, max_length=256),
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> _RetentionOverview:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=workspace_id, chat_key=chat_key, username=_current_user.username)
+    status = await _call(MemoryService().retention_status(context))
+    collections = await list_fact_collections()
+    return _RetentionOverview(
+        **status,
+        purge_enabled=MemoryService._purge_enabled(),
+        collections=collections,
+    )
+
+
+@router.post(
+    "/collections/purge",
+    summary="删除配置变更后遗留的事实索引 collection",
+    response_model=_CollectionPurgeResult,
+)
+@require_role(Role.Admin)
+async def purge_stale_collections(
+    body: _PurgeBody,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> _CollectionPurgeResult:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    # 鉴权与逐个 scope 无关，但要确认调用者对该会话有管理权限。
+    _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
+    removed = await purge_stale_fact_collections()
+    return _CollectionPurgeResult(removed=removed)
 
 
 @router.get("/{assertion_id}", summary="查看事实详情与版本链", response_model=FactDetail)

@@ -115,6 +115,50 @@ class QdrantFactIndex:
         return [keys[str(point.id)] for point in result.points if str(point.id) in keys]
 
 
+class FactCollectionInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    identity: str
+    current: bool
+    points: int | None = None
+
+
+FACT_COLLECTION_PREFIX = "nekro_facts_v1_"
+
+
+async def list_fact_collections() -> list[FactCollectionInfo]:
+    """列出事实投影 collection；只认本领域前缀，绝不触碰段落库。"""
+    client = await get_qdrant_client()
+    current = _configuration_identity()
+    infos: list[FactCollectionInfo] = []
+    for item in await client.get_collections():
+        name = item.name
+        if not name.startswith(FACT_COLLECTION_PREFIX):
+            continue
+        identity = name[len(FACT_COLLECTION_PREFIX):]
+        points: int | None = None
+        try:
+            detail = await client.get_collection(name)
+            points = int(getattr(detail, "points_count", 0) or 0)
+        except Exception:
+            # 读不到计数不影响清理决策，但也不能声称是 0。
+            points = None
+        infos.append(FactCollectionInfo(name=name, identity=identity, current=identity == current, points=points))
+    return sorted(infos, key=lambda info: (info.current, info.name))
+
+
+async def purge_stale_fact_collections() -> list[str]:
+    """删除配置已变更后遗留的事实投影；当前配置的 collection 永不在此删除。"""
+    client = await get_qdrant_client()
+    removed: list[str] = []
+    for info in await list_fact_collections():
+        if info.current:
+            continue
+        await client.delete_collection(info.name)
+        removed.append(info.name)
+    return removed
+
+
 class IndexLease(BaseModel):
     id: UUID
     token: UUID
