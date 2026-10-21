@@ -44,13 +44,23 @@ from nekro_agent.tools.common_util import (
 logger = get_sub_logger("message_pipeline")
 
 
-async def _notify_memory_scheduler(chat_key: str, workspace_id: int | None, content_length: int) -> None:
+async def _notify_memory_scheduler(
+    chat_key: str, workspace_id: int | None, content_length: int, message_id: int | None = None,
+) -> None:
     """通知记忆调度器有新消息（非阻塞）"""
     if workspace_id is None or not is_memory_system_enabled():
         return
     try:
+        from nekro_agent.services.memory.routing import get_memory_route
+        from nekro_agent.services.memory.runtime import memory_fact_runtime
         from nekro_agent.services.memory.scheduler import memory_scheduler
 
+        route = await get_memory_route(chat_key)
+        if route is not None and route.mode in {"shadow", "service"}:
+            if message_id is not None:
+                await memory_fact_runtime.enqueue_message(message_id)
+            if route.uses_service:
+                return
         await memory_scheduler.on_new_message(
             chat_key=chat_key,
             workspace_id=workspace_id,
@@ -483,7 +493,7 @@ class MessageService:
         """持久化并广播人类用户消息。"""
         content_data = [o.model_dump() for o in message.content_data]
 
-        await DBChatMessage.create(
+        stored_message = await DBChatMessage.create(
             message_id=message.message_id,
             sender_id=message.sender_id,
             sender_name=message.sender_name,
@@ -507,6 +517,7 @@ class MessageService:
                 chat_key=message.chat_key,
                 workspace_id=db_chat_channel.workspace_id,
                 content_length=len(message.content_text),
+                message_id=stored_message.id,
             ),
         )
 

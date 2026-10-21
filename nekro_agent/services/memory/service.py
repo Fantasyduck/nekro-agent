@@ -41,7 +41,7 @@ def message_revision(message: DBChatMessage) -> str:
     """源修订覆盖内容、归属和撤回状态，不能仅信任模型返回的消息编号。"""
     return _digest([
         message.chat_key, message.adapter_key, message.platform_userid,
-        message.content_text, message.is_recalled,
+        message.sender_id, message.send_timestamp, message.content_text, message.is_recalled,
     ])
 
 
@@ -184,6 +184,7 @@ class MemoryService:
                     semantic_version=(latest.semantic_version + 1 if latest else 1),
                     status=FactStatus.PENDING if pending else FactStatus.ACTIVE,
                     confidence=proposal.confidence,
+                    min_favor=proposal.min_favor if manual or current is None else max(current.min_favor, proposal.min_favor),
                     verification_status=(
                         "manual_admin" if manual else "user_declared"
                         if proposal.subject_key == source.speaker_key else "third_party"
@@ -205,7 +206,8 @@ class MemoryService:
                 assertion.row_revision += 1
                 if manual:
                     assertion.verification_status = "manual_admin"
-                await assertion.save(using_db=conn, update_fields=["row_revision", "verification_status"])
+                assertion.min_favor = proposal.min_favor if manual else max(assertion.min_favor, proposal.min_favor)
+                await assertion.save(using_db=conn, update_fields=["row_revision", "verification_status", "min_favor"])
             await DBMemScope.filter(id=scope.id).using_db(conn).update(revision=scope.revision + 1)
             await self._emit(scope, context, assertion.id, assertion.row_revision, action, conn)
             result = ResolutionResult(
@@ -268,15 +270,20 @@ class MemoryService:
     async def recall(
         self, context: RequestContext, *, subject_key: str | None = None, predicate: str | None = None,
         query: str = "", limit: int = 20,
+        expression_ceiling: int = 0,
     ) -> EvidenceBundle:
         if limit < 1 or limit > 100:
             raise MemoryError("LIMIT_INVALID")
+        if isinstance(expression_ceiling, bool) or not isinstance(expression_ceiling, int) or not 0 <= expression_ceiling <= 100:
+            raise MemoryError("EXPRESSION_GATE_INVALID")
         scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
         now = datetime.now(timezone.utc)
         rows = DBMemAssertion.filter(
             Q(valid_to=None) | Q(valid_to__gt=now), scope_id__in=list(scopes),
             status=FactStatus.ACTIVE, valid_from__lte=now,
         )
+        if not (context.is_admin and context.purpose == "admin_review"):
+            rows = rows.filter(min_favor__lte=expression_ceiling)
         if subject_key is not None:
             rows = rows.filter(subject_key=subject_key)
         if predicate is not None:
@@ -293,6 +300,7 @@ class MemoryService:
             items.append(EvidenceItem(
                 assertion_id=row.id, scope_id=row.scope_id, subject_key=row.subject_key,
                 predicate=row.predicate, value=row.value_json["value"], confidence=row.confidence,
+                min_favor=row.min_favor,
                 verification_status=row.verification_status, semantic_version=row.semantic_version,
                 row_revision=row.row_revision, valid_from=row.valid_from, source_refs=sources,
             ))

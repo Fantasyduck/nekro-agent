@@ -57,6 +57,9 @@ async def _init_memory_scheduler() -> None:
 
     memory_scheduler.set_consolidation_handler(consolidation_handler)
     await memory_scheduler.start()
+    from nekro_agent.services.memory.runtime import memory_fact_runtime
+
+    await memory_fact_runtime.start()
 
 
 async def _init_kb_collection() -> None:
@@ -255,6 +258,9 @@ if _driver is not None:
 
         step_started_at = time.perf_counter()
         logger.debug("[shutdown] stopping memory scheduler")
+        from nekro_agent.services.memory.runtime import memory_fact_runtime
+
+        await memory_fact_runtime.stop()
         await memory_scheduler.stop()
         logger.debug(f"[shutdown] memory scheduler stopped in {time.perf_counter() - step_started_at:.3f}s")
 

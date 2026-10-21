@@ -319,6 +319,23 @@ async def _inject_memory_context(
         max_length = config.MEMORY_CONTEXT_MAX_LENGTH
 
     try:
+        from nekro_agent.services.memory.routing import get_memory_route
+
+        route = await get_memory_route(chat_key)
+        if route is not None and route.uses_service:
+            from nekro_agent.services.agent.memory_context import ContextBudget, MemoryContextBuilder
+            from nekro_agent.services.memory.service import MemoryService
+
+            # 这里是整个 prompt 中记忆块的保守上限；其他模板仍由现有主循环预算管理。
+            block_budget = max(1, max_length)
+            bundle = await MemoryContextBuilder(MemoryService()).build(
+                route.context(actor_key="service:answer", purpose="answer"),
+                ContextBudget(
+                    model_limit=block_budget, reserved_output=0, tool_reserve=0,
+                    safety_margin=0, prompt_overhead=0, memory_limit=block_budget,
+                ),
+            )
+            return bundle.text + "\n\n" if bundle.fact_ids else ""
         from nekro_agent.services.memory.retriever import (
             MemoryRecallQuery,
             compile_memories_for_context,

@@ -47,6 +47,7 @@ class FactProposal(BaseModel):
     predicate: str = Field(min_length=1, max_length=128)
     value: JsonValue
     confidence: float = Field(ge=0, le=1, allow_inf_nan=False)
+    min_favor: int = Field(default=0, ge=0, le=100, strict=True)
     source: SourceRef
     valid_from: AwareDatetime | None = None
 
@@ -67,6 +68,7 @@ class EvidenceItem(BaseModel):
     predicate: str
     value: JsonValue
     confidence: float
+    min_favor: int = 0
     verification_status: str
     semantic_version: int
     row_revision: int

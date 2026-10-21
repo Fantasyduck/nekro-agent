@@ -47,6 +47,7 @@ class DBMemAssertion(Model):
     row_revision = fields.IntField(default=1)
     status = fields.CharField(max_length=24, index=True)
     confidence = fields.FloatField()
+    min_favor = fields.IntField(default=0)
     verification_status = fields.CharField(max_length=32)
     valid_from = fields.DatetimeField()
     valid_to = fields.DatetimeField(null=True)

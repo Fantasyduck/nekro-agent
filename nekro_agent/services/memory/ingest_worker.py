@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
+from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_mem_fact import (
     DBMemObservation,
@@ -63,6 +64,11 @@ class MemoryIngestQueue:
             raise MemoryError("PIPELINE_MODE_INVALID")
         scope = await self.service.resolve_scope(context)
         async with in_transaction() as conn:
+            channel = await DBChatChannel.filter(
+                chat_key=context.chat_key, workspace_id=context.workspace_id,
+            ).using_db(conn).select_for_update().first()
+            if channel is None:
+                raise MemoryError("SCOPE_UNRESOLVED")
             scope = await DBMemScope.filter(id=scope.id).using_db(conn).select_for_update().get()
             if scope.writer_revision != expected_writer_revision:
                 raise MemoryError("WRITER_FENCED")
@@ -139,7 +145,7 @@ class MemoryIngestQueue:
         message = await DBChatMessage.filter(
             id=int(observation.source_id), chat_key=scope.origin_chat_key, is_recalled=False,
         ).first()
-        if message is None or message_revision(message) != observation.source_revision:
+        if message is None or str(message.sender_id) == "-1" or message_revision(message) != observation.source_revision:
             raise MemoryError("SOURCE_INVALID")
         context = RequestContext(
             workspace_id=scope.workspace_id, agent_id=scope.agent_id, actor_key="service:memory",

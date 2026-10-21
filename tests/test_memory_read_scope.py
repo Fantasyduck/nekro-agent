@@ -258,6 +258,9 @@ async def test_empty_id_scope_does_not_touch_qdrant(monkeypatch: pytest.MonkeyPa
 
 async def test_online_history_passes_current_channel_scope(monkeypatch: pytest.MonkeyPatch) -> None:
     from nekro_agent.services.agent.templates import history
+    from nekro_agent.services.memory import routing
+
+    monkeypatch.setattr(routing, "get_memory_route", AsyncMock(return_value=None))
     from nekro_agent.services.memory.recall_contract import MemoryRecallPlan, MemoryRecallQuerySpec
 
     memory = retriever.RetrievedMemory(

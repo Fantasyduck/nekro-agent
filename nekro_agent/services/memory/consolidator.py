@@ -194,6 +194,11 @@ class EpisodicConsolidator:
         result = ConsolidationResult()
 
         try:
+            from nekro_agent.services.memory.routing import get_memory_route
+
+            route = await get_memory_route(chat_key)
+            if route is not None and route.uses_service:
+                return result
             # 加载人设上下文
             await self.load_persona_context(chat_key)
 
@@ -644,21 +649,24 @@ class EpisodicConsolidator:
                 return existing, [], []
 
         # 创建段落
-        paragraph = await DBMemParagraph.create(
-            workspace_id=self.workspace_id,
-            memory_source="na",
-            cognitive_type=CognitiveType.EPISODIC,
-            knowledge_type=kt,
-            content=content,
-            summary=summary,
-            event_time=datetime.fromtimestamp(anchor_end.send_timestamp) if anchor_end else datetime.now(),
-            origin_kind=OriginKind.CONSOLIDATION,
-            origin_chat_key=chat_key,
-            anchor_msg_id_start=anchor_start.message_id if anchor_start else None,
-            anchor_msg_id_end=anchor_end.message_id if anchor_end else None,
-            anchor_timestamp_start=anchor_start.send_timestamp if anchor_start else None,
-            anchor_timestamp_end=anchor_end.send_timestamp if anchor_end else None,
-        )
+        from nekro_agent.services.memory.routing import legacy_fact_write
+
+        async with legacy_fact_write(chat_key):
+            paragraph = await DBMemParagraph.create(
+                workspace_id=self.workspace_id,
+                memory_source="na",
+                cognitive_type=CognitiveType.EPISODIC,
+                knowledge_type=kt,
+                content=content,
+                summary=summary,
+                event_time=datetime.fromtimestamp(anchor_end.send_timestamp) if anchor_end else datetime.now(),
+                origin_kind=OriginKind.CONSOLIDATION,
+                origin_chat_key=chat_key,
+                anchor_msg_id_start=anchor_start.message_id if anchor_start else None,
+                anchor_msg_id_end=anchor_end.message_id if anchor_end else None,
+                anchor_timestamp_start=anchor_start.send_timestamp if anchor_start else None,
+                anchor_timestamp_end=anchor_end.send_timestamp if anchor_end else None,
+            )
 
         # 生成向量并存储
         try:

@@ -62,19 +62,22 @@ async def persist_cc_task_memory(
         if existing is not None:
             return existing
 
-    paragraph = await DBMemParagraph.create(
-        workspace_id=workspace_id,
-        memory_source="cc",
-        cognitive_type=CognitiveType.SEMANTIC,
-        knowledge_type=KnowledgeType.EXPERIENCE,
-        content=content,
-        summary=summary,
-        event_time=event_time or datetime.now(),
-        half_life_seconds=config.MEMORY_SEMANTIC_HALF_LIFE_DAYS * 24 * 3600,
-        origin_kind=OriginKind.TASK,
-        origin_ref=origin_ref,
-        origin_chat_key=source_chat_key,
-    )
+    from nekro_agent.services.memory.routing import legacy_fact_write
+
+    async with legacy_fact_write(source_chat_key):
+        paragraph = await DBMemParagraph.create(
+            workspace_id=workspace_id,
+            memory_source="cc",
+            cognitive_type=CognitiveType.SEMANTIC,
+            knowledge_type=KnowledgeType.EXPERIENCE,
+            content=content,
+            summary=summary,
+            event_time=event_time or datetime.now(),
+            half_life_seconds=config.MEMORY_SEMANTIC_HALF_LIFE_DAYS * 24 * 3600,
+            origin_kind=OriginKind.TASK,
+            origin_ref=origin_ref,
+            origin_chat_key=source_chat_key,
+        )
 
     try:
         embedding = await embed_text(content)
