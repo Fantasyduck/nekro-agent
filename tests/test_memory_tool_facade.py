@@ -73,6 +73,44 @@ async def test_notes_are_multivalued_and_keep_metadata() -> None:
     assert payload["text"] == "喜欢在雨天写代码" and payload["tags"] == ["preference"]
 
 
+async def test_note_title_and_origin_are_kept_and_idempotent_separately() -> None:
+    await activate()
+    await proposal("tea")
+    subject = tool_facade.normalize_subject("onebot_v11", "alice")
+    titled = await tool_facade.remember_note(
+        chat_key="private_alice", actor_key=ALICE, subject_key=subject,
+        text="90 度水温", title="冲泡温度", origin="agent_tool",
+    )
+    plain = await tool_facade.remember_note(
+        chat_key="private_alice", actor_key=ALICE, subject_key=subject,
+        text="90 度水温",
+    )
+    # 标题参与幂等键：同正文但不同标题必须是两条独立笔记，否则结构化笔记会互相覆盖。
+    assert titled.assertion_id != plain.assertion_id
+    titled_row = await DBMemAssertion.get(id=titled.assertion_id)
+    payload = titled_row.value_json["value"]
+    assert payload["title"] == "冲泡温度" and payload["origin"] == "agent_tool"
+    plain_payload = (await DBMemAssertion.get(id=plain.assertion_id)).value_json["value"]
+    assert "title" not in plain_payload and "origin" not in plain_payload
+
+
+async def test_list_facts_filters_note_predicate() -> None:
+    await activate()
+    await proposal("tea")
+    subject = tool_facade.normalize_subject("onebot_v11", "alice")
+    await tool_facade.remember_fact(
+        chat_key="private_alice", actor_key=ALICE, subject_key=subject, predicate="drink", value="tea",
+    )
+    await tool_facade.remember_note(
+        chat_key="private_alice", actor_key=ALICE, subject_key=subject, text="笔记一", title="标题一",
+    )
+    page = await tool_facade.list_facts(
+        chat_key="private_alice", actor_key=ALICE, predicate=tool_facade.NOTE_PREDICATE,
+    )
+    assert page.total == 1
+    assert page.items[0].value["title"] == "标题一"
+
+
 async def test_list_facts_reads_back_current_values() -> None:
     await activate()
     await proposal("tea")

@@ -127,8 +127,15 @@ async def remember_note(
     scope: str = "channel",
     min_favor: int = 0,
     confidence: float = 0.9,
+    title: str = "",
+    origin: str = "",
 ) -> ResolutionResult:
-    """提交一条自由文本长期记忆（笔记），保留标签与重要度等元数据。"""
+    """提交一条自由文本长期记忆（笔记），保留标签与重要度等元数据。
+
+    结构化笔记（有标题）与自由文本记忆共用同一个多值谓词，靠 value 里的
+    title 区分：有标题的条目在面板「笔记」页展示，没有标题的在「记忆」页展示。
+    origin 记录由哪个入口写入（agent_tool / knowledge_grow 等），只用于展示来源。
+    """
     route = await require_service_route(chat_key)
     source = await latest_message_source(chat_key)
     payload = {
@@ -138,6 +145,10 @@ async def remember_note(
         "memory_type": memory_type,
         "scope": scope,
     }
+    if str(title or "").strip():
+        payload["title"] = str(title).strip()
+    if str(origin or "").strip():
+        payload["origin"] = str(origin).strip()
     proposal = FactProposal(
         subject_key=subject_key,
         predicate=NOTE_PREDICATE,
@@ -146,7 +157,7 @@ async def remember_note(
         min_favor=min_favor,
         source=source,
     )
-    idempotency_key = f"note:{source.id}:{digest([subject_key, text])[:32]}"
+    idempotency_key = f"note:{source.id}:{digest([subject_key, text, str(title or '').strip()])[:32]}"
     return await service().propose_fact(
         request_context(route, actor_key=actor_key), proposal, idempotency_key=idempotency_key,
     )
