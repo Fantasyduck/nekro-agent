@@ -436,6 +436,11 @@ class CoreConfig(ConfigBase):
     MEMORY_FACT_SOURCE_MAX_CHARS: int = Field(default=8000, ge=128, le=64000, title="单条事实来源最大字符数")
     MEMORY_FACT_WORKER_INTERVAL_SECONDS: int = Field(default=10, ge=1, le=300, title="事实任务检查间隔秒数")
     MEMORY_FACT_INDEX_ENABLED: bool = Field(default=False, title="启用统一事实向量索引与检索")
+    MEMORY_FACT_PURGE_AFTER_DAYS: int = Field(
+        default=0, ge=0, le=3650, title="被遗忘事实正文的物理保留天数",
+        description="0 表示不启用物理清理：逻辑遗忘后正文仍留在库里，只保证不再参与读取。"
+        "设为 N 天则在遗忘满 N 天后清除正文，并按配置清理备份；具体天数由部署方按隐私承诺决定。",
+    )
     MEMORY_CONTEXT_MAX_LENGTH: int = Field(
         default=1200,
         title="记忆上下文最大长度",

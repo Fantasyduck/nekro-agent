@@ -121,6 +121,7 @@ def test_error_mapping_hides_existence_and_keeps_semantics() -> None:
     assert isinstance(memory_facts_router._to_app_error(MemoryError("VERSION_CONFLICT")), MemoryConflictError)
     assert isinstance(memory_facts_router._to_app_error(MemoryError("SOURCE_INVALID")), MemoryConflictError)
     assert isinstance(memory_facts_router._to_app_error(MemoryError("LIMIT_INVALID")), ValidationError)
+    assert isinstance(memory_facts_router._to_app_error(MemoryError("KIND_INVALID")), ValidationError)
     assert isinstance(memory_facts_router._to_app_error(MemoryError("SOMETHING_NEW")), OperationFailedError)
 
 

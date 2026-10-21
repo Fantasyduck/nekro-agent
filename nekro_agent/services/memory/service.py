@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from pydantic import JsonValue
@@ -12,6 +12,7 @@ from tortoise.backends.base.client import BaseDBAsyncClient
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
 
+from nekro_agent.core.config import config
 from nekro_agent.models.db_chat_channel import DBChatChannel
 from nekro_agent.models.db_chat_message import DBChatMessage
 from nekro_agent.models.db_mem_fact import (
@@ -363,9 +364,80 @@ class MemoryService:
                 await self._emit(scope, context, version.id, version.row_revision + 1, "deleted", conn)
             if versions:
                 await DBMemScope.filter(id=scope.id).using_db(conn).update(revision=scope.revision + 1)
-            return ForgetReceipt(
-                logical_block_committed=True, affected_assertions=len(versions), derived_cleanup_pending=bool(versions),
-            )
+            version_ids = [version.id for version in versions]
+        # 回执必须分开四段状态：逻辑阻断已提交不等于向量已撤、也不等于正文已清。
+        index_pending = False
+        if version_ids:
+            index_pending = await DBMemIndexOutbox.filter(
+                assertion_id__in=version_ids, state__in=["pending", "running", "dead_letter"],
+            ).exists()
+        receipt = ForgetReceipt(
+            logical_block_committed=True, affected_assertions=len(version_ids),
+            derived_cleanup_pending=bool(version_ids), index_cleanup_pending=index_pending,
+            physical_purge_state=await self._purge_state(version_ids),
+        )
+        return receipt
+
+    @staticmethod
+    def _purge_enabled() -> bool:
+        return int(config.MEMORY_FACT_PURGE_AFTER_DAYS) > 0
+
+    async def _purge_state(self, assertion_ids: list[UUID]) -> str:
+        """物理清理状态；未启用正文清理时如实返回 disabled，不假装已完成。"""
+        if not assertion_ids or not self._purge_enabled():
+            return "disabled"
+        rows = await DBMemAssertion.filter(id__in=assertion_ids).values_list("value_json", flat=True)
+        if all(isinstance(value, dict) and value.get("purged") is True for value in rows):
+            return "completed"
+        deadline = datetime.now(timezone.utc) - timedelta(days=int(config.MEMORY_FACT_PURGE_AFTER_DAYS))
+        deleted_at = await self._deleted_at(assertion_ids)
+        due = [stamp for stamp in deleted_at if stamp is not None and stamp <= deadline]
+        return "pending" if due else "scheduled"
+
+    @staticmethod
+    async def _deleted_at(assertion_ids: list[UUID]) -> list[datetime]:
+        return list(await DBMemAuditEvent.filter(
+            target_id__in=assertion_ids, operation="deleted",
+        ).values_list("created_at", flat=True))
+
+    async def purge_forgotten(self, context: RequestContext, *, limit: int = 50) -> int:
+        """按保留期清除已遗忘事实的正文；只清正文，保留审计与来源标识。"""
+        if not context.is_admin or context.purpose != "admin_review":
+            raise MemoryError("SCOPE_DENIED")
+        if not 1 <= limit <= 500:
+            raise MemoryError("LIMIT_INVALID")
+        if not self._purge_enabled():
+            return 0
+        deadline = datetime.now(timezone.utc) - timedelta(days=int(config.MEMORY_FACT_PURGE_AFTER_DAYS))
+        scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
+        candidates: list[UUID] = []
+        async for row in DBMemAssertion.filter(scope_id__in=list(scopes), status=FactStatus.DELETED).order_by("recorded_at"):
+            if isinstance(row.value_json, dict) and row.value_json.get("purged") is True:
+                continue
+            stamps = await self._deleted_at([row.id])
+            if stamps and min(stamps) <= deadline:
+                candidates.append(row.id)
+            if len(candidates) >= limit:
+                break
+        purged = 0
+        for assertion_id in candidates:
+            row = await DBMemAssertion.filter(id=assertion_id).first()
+            if row is None:
+                continue
+            async with in_transaction() as conn:
+                locked = await DBMemAssertion.filter(id=assertion_id).using_db(conn).select_for_update().first()
+                if locked is None or locked.status != FactStatus.DELETED:
+                    continue
+                # 只保留「已清除」这一事实，不留原值：purged 标记让重复清理幂等。
+                await DBMemAssertion.filter(id=assertion_id).using_db(conn).update(
+                    value_json={"value": None, "purged": True}, row_revision=locked.row_revision + 1,
+                )
+                await DBMemAuditEvent.create(
+                    scope_id=locked.scope_id, actor_key=context.actor_key, operation="fact.purged",
+                    target_id=assertion_id, reason_code="retention_elapsed", using_db=conn,
+                )
+            purged += 1
+        return purged
 
     async def grant_scope(
         self, context: RequestContext, *, audience_chat_key: str, valid_until: datetime | None = None,

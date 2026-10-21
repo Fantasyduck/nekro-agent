@@ -73,6 +73,7 @@ class MemoryFactRuntime:
                 await FactIndexWorker(QdrantFactIndex()).process_one()
             except Exception as error:
                 logger.warning(f"事实索引本轮降级: error_type={type(error).__name__}")
+        await self._purge_if_due()
         if not config.MEMORY_FACT_WORKER_ENABLED:
             return
         from nekro_agent.services.memory.fact_extractor import extract_message_facts
@@ -92,6 +93,28 @@ class MemoryFactRuntime:
                 # 只记录分类，不将模型错误响应或消息正文写入普通日志。
                 logger.warning(f"事实任务本轮降级: scope={scope.id}, error_type={type(error).__name__}")
 
+    async def _purge_if_due(self) -> None:
+        """保留期到达后清除已遗忘正文；未配置保留天数时完全不动数据。"""
+        if int(config.MEMORY_FACT_PURGE_AFTER_DAYS) <= 0:
+            return
+        from nekro_agent.services.memory.contracts import RequestContext
+        from nekro_agent.services.memory.service import MemoryService
+
+        service = MemoryService()
+        scopes = await DBMemScope.filter(agent_id=config.MEMORY_FACT_AGENT_ID).order_by("id")
+        for scope in scopes:
+            context = RequestContext(
+                workspace_id=scope.workspace_id, agent_id=scope.agent_id, actor_key="system:retention",
+                chat_key=scope.origin_chat_key, purpose="admin_review", is_admin=True,
+            )
+            try:
+                purged = await service.purge_forgotten(context, limit=50)
+                if purged:
+                    logger.info(f"事实正文清理完成: scope={scope.id}, purged={purged}")
+            except Exception as error:
+                # 清理失败不影响读取阻断；下一轮重试。
+                logger.warning(f"事实正文清理本轮降级: scope={scope.id}, error_type={type(error).__name__}")
+
     async def _run(self) -> None:
         while True:
             try:
@@ -103,7 +126,11 @@ class MemoryFactRuntime:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
-        if not is_memory_system_enabled() or not (config.MEMORY_FACT_WORKER_ENABLED or config.MEMORY_FACT_INDEX_ENABLED):
+        if not is_memory_system_enabled() or not (
+            config.MEMORY_FACT_WORKER_ENABLED
+            or config.MEMORY_FACT_INDEX_ENABLED
+            or int(config.MEMORY_FACT_PURGE_AFTER_DAYS) > 0
+        ):
             return
         self._task = asyncio.create_task(self._run(), name="memory-fact-runtime")
 

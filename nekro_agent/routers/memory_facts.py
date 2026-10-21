@@ -17,6 +17,7 @@ from nekro_agent.models.db_user import DBUser
 from nekro_agent.schemas.errors import (
     AppError,
     MemoryConflictError,
+    NotFoundError,
     OperationFailedError,
     PermissionDeniedError,
     ValidationError,
@@ -31,6 +32,7 @@ from nekro_agent.services.memory.contracts import (
     ResolutionResult,
     ScopeGrantRecord,
 )
+from nekro_agent.services.memory.dead_letter import DeadLetterAdmin, DeadLetterPage
 from nekro_agent.services.memory.feature_flags import MemoryOperation, ensure_memory_system_enabled
 from nekro_agent.services.memory.service import MemoryService
 from nekro_agent.services.user.deps import get_current_active_user
@@ -54,6 +56,7 @@ _MEMORY_ERROR_MAP: dict[str, Any] = {
     "EXPRESSION_GATE_INVALID": lambda code: ValidationError(reason=code),
     "IDEMPOTENCY_KEY_INVALID": lambda code: ValidationError(reason=code),
     "RESERVED_DOMAIN": lambda code: ValidationError(reason=code),
+    "KIND_INVALID": lambda code: ValidationError(reason=code),
 }
 
 
@@ -88,6 +91,22 @@ class _ActionOk(BaseModel):
     ok: bool = True
 
 
+class _DeadLetterBody(BaseModel):
+    workspace_id: int = Field(gt=0)
+    chat_key: str = Field(min_length=1, max_length=256)
+    kind: Literal["index", "ingest"]
+
+
+class _PurgeBody(BaseModel):
+    workspace_id: int = Field(gt=0)
+    chat_key: str = Field(min_length=1, max_length=256)
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class _PurgeResult(BaseModel):
+    purged: int
+
+
 def _admin_context(*, workspace_id: int, chat_key: str, username: str) -> RequestContext:
     """管理端上下文：管理员身份与操作者由服务端注入，不接受客户端传入。"""
     return RequestContext(
@@ -106,6 +125,13 @@ def _to_app_error(exc: MemoryError) -> AppError:
     if factory is not None:
         return factory(code)
     return OperationFailedError(operation="记忆操作")
+
+
+def _dead_letter_admin(context: RequestContext) -> DeadLetterAdmin:
+    try:
+        return DeadLetterAdmin(context=context)
+    except MemoryError as exc:
+        raise _to_app_error(exc) from exc
 
 
 async def _call(awaitable: Awaitable[T]) -> T:
@@ -188,6 +214,65 @@ async def revoke_memory_grant(
     context = _admin_context(workspace_id=workspace_id, chat_key=chat_key, username=_current_user.username)
     await _call(MemoryService().revoke_grant(context, grant_id))
     return _ActionOk()
+
+
+@router.get("/dead_letters", summary="查看索引与抽取队列的死信", response_model=DeadLetterPage)
+@require_role(Role.Admin)
+async def list_memory_dead_letters(
+    workspace_id: int = Query(..., gt=0),
+    chat_key: str = Query(..., min_length=1, max_length=256),
+    kind: Literal["index", "ingest"] = Query(default="index"),
+    state: str = Query(default="dead_letter", max_length=24),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> DeadLetterPage:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=workspace_id, chat_key=chat_key, username=_current_user.username)
+    admin = _dead_letter_admin(context)
+    return await _call(admin.list(kind=kind, state=state, limit=limit, offset=offset))
+
+
+@router.post("/dead_letters/{item_id}/retry", summary="重试死信任务", response_model=_ActionOk)
+@require_role(Role.Admin)
+async def retry_memory_dead_letter(
+    item_id: UUID,
+    body: _DeadLetterBody,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> _ActionOk:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
+    admin = _dead_letter_admin(context)
+    if not await _call(admin.retry(kind=body.kind, item_id=item_id)):
+        raise NotFoundError()
+    return _ActionOk()
+
+
+@router.post("/dead_letters/{item_id}/ignore", summary="确认忽略死信任务", response_model=_ActionOk)
+@require_role(Role.Admin)
+async def ignore_memory_dead_letter(
+    item_id: UUID,
+    body: _DeadLetterBody,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> _ActionOk:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
+    admin = _dead_letter_admin(context)
+    if not await _call(admin.ignore(kind=body.kind, item_id=item_id)):
+        raise NotFoundError()
+    return _ActionOk()
+
+
+@router.post("/purge", summary="按保留期清理已遗忘事实的正文", response_model=_PurgeResult)
+@require_role(Role.Admin)
+async def purge_memory_facts(
+    body: _PurgeBody,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> _PurgeResult:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
+    purged = await _call(MemoryService().purge_forgotten(context, limit=body.limit))
+    return _PurgeResult(purged=purged)
 
 
 @router.get("/{assertion_id}", summary="查看事实详情与版本链", response_model=FactDetail)

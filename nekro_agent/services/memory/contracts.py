@@ -82,9 +82,19 @@ class EvidenceBundle(BaseModel):
 
 
 class ForgetReceipt(BaseModel):
+    """遗忘回执：四段状态必须分开，不能用一句「已删除」概括。
+
+    逻辑阻断完成后只能承诺「后续不会再用于回答」；索引清理与物理清理各自
+    有独立状态，未完成时不能声称彻底清除。
+    """
+
     logical_block_committed: bool
     affected_assertions: int
     derived_cleanup_pending: bool
+    # 索引里是否还有该事实的投影未撤除；SQL tombstone 已阻断读取，但这不代表向量已清。
+    index_cleanup_pending: bool = False
+    # scheduled：按保留期排队；pending：已到期待执行；completed：正文已物理清除；disabled：未启用物理清理。
+    physical_purge_state: Literal["disabled", "scheduled", "pending", "completed"] = "disabled"
 
 
 class FactRecord(BaseModel):
