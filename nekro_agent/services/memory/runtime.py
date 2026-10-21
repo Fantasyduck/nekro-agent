@@ -64,7 +64,16 @@ class MemoryFactRuntime:
         return (messages[-1].id if messages else after_id), len(messages) == page_size
 
     async def tick(self) -> None:
-        if not is_memory_system_enabled() or not config.MEMORY_FACT_WORKER_ENABLED:
+        if not is_memory_system_enabled():
+            return
+        if config.MEMORY_FACT_INDEX_ENABLED:
+            from nekro_agent.services.memory.fact_index import FactIndexWorker, QdrantFactIndex
+
+            try:
+                await FactIndexWorker(QdrantFactIndex()).process_one()
+            except Exception as error:
+                logger.warning(f"事实索引本轮降级: error_type={type(error).__name__}")
+        if not config.MEMORY_FACT_WORKER_ENABLED:
             return
         from nekro_agent.services.memory.fact_extractor import extract_message_facts
 
@@ -94,7 +103,7 @@ class MemoryFactRuntime:
     async def start(self) -> None:
         if self._task is not None and not self._task.done():
             return
-        if not is_memory_system_enabled() or not config.MEMORY_FACT_WORKER_ENABLED:
+        if not is_memory_system_enabled() or not (config.MEMORY_FACT_WORKER_ENABLED or config.MEMORY_FACT_INDEX_ENABLED):
             return
         self._task = asyncio.create_task(self._run(), name="memory-fact-runtime")
 

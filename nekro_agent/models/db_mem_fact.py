@@ -122,6 +122,8 @@ class DBMemIndexOutbox(Model):
     assertion_version = fields.IntField()
     operation = fields.CharField(max_length=24)
     state = fields.CharField(max_length=24, default="pending", index=True)
+    lease_token = fields.UUIDField(null=True)
+    lease_until = fields.DatetimeField(null=True)
     attempts = fields.IntField(default=0)
     next_retry_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)

@@ -435,6 +435,7 @@ class CoreConfig(ConfigBase):
     MEMORY_FACT_AGENT_ID: str = Field(default="nekro-agent", min_length=1, max_length=128, title="统一事实代理标识")
     MEMORY_FACT_SOURCE_MAX_CHARS: int = Field(default=8000, ge=128, le=64000, title="单条事实来源最大字符数")
     MEMORY_FACT_WORKER_INTERVAL_SECONDS: int = Field(default=10, ge=1, le=300, title="事实任务检查间隔秒数")
+    MEMORY_FACT_INDEX_ENABLED: bool = Field(default=False, title="启用统一事实向量索引与检索")
     MEMORY_CONTEXT_MAX_LENGTH: int = Field(
         default=1200,
         title="记忆上下文最大长度",

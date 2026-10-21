@@ -288,11 +288,10 @@ class MemoryService:
             rows = rows.filter(subject_key=subject_key)
         if predicate is not None:
             rows = rows.filter(predicate=predicate)
-        # M1 SQL 精确召回；多路向量和中文全文留待索引管线，不能伪称已支持。
+        from nekro_agent.services.memory.fact_retrieval import rank_facts
+
         items: list[EvidenceItem] = []
         async for row in rows.order_by("-recorded_at"):
-            if query and query.casefold() not in json.dumps(row.value_json["value"], ensure_ascii=False).casefold():
-                continue
             scope = scopes[row.scope_id]
             sources = await self._valid_sources(row.id, scope)
             if not sources:
@@ -304,8 +303,10 @@ class MemoryService:
                 verification_status=row.verification_status, semantic_version=row.semantic_version,
                 row_revision=row.row_revision, valid_from=row.valid_from, source_refs=sources,
             ))
-            if len(items) >= limit:
+            if not query and len(items) >= limit:
                 break
+        if query:
+            items = await rank_facts(query, items, limit=limit)
         bundle = EvidenceBundle(items=items, policy_revisions={str(s.id): s.revision for s in scopes.values()})
         await self.validate_bundle(context, bundle)
         return bundle
@@ -319,6 +320,9 @@ class MemoryService:
         for item in bundle.items:
             row = await DBMemAssertion.filter(id=item.assertion_id, status=FactStatus.ACTIVE).first()
             if row is None or row.row_revision != item.row_revision or str(row.scope_id) not in scopes:
+                raise MemoryError("POLICY_CHANGED")
+            now = datetime.now(timezone.utc)
+            if row.valid_from > now or row.valid_to is not None and row.valid_to <= now:
                 raise MemoryError("POLICY_CHANGED")
             if not await self._valid_sources(row.id, scopes[str(row.scope_id)]):
                 raise MemoryError("SOURCE_INVALID")
