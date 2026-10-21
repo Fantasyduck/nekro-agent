@@ -12,6 +12,8 @@ class DBMemScope(Model):
     agent_id = fields.CharField(max_length=128)
     origin_chat_key = fields.CharField(max_length=256)
     revision = fields.IntField(default=1)
+    pipeline_mode = fields.CharField(max_length=24, default="legacy_guarded")
+    writer_revision = fields.IntField(default=1)
 
     class Meta:
         table = "mem_scope"
@@ -90,6 +92,27 @@ class DBMemWriteRequest(Model):
 
     class Meta:
         table = "mem_write_request"
+
+
+class DBMemWriteJob(Model):
+    id = fields.UUIDField(pk=True, default=uuid4)
+    scope_id = fields.UUIDField(index=True)
+    observation_id = fields.UUIDField(index=True)
+    pipeline_version = fields.CharField(max_length=64)
+    writer_revision = fields.IntField()
+    mode = fields.CharField(max_length=24)
+    state = fields.CharField(max_length=24, default="pending", index=True)
+    lease_token = fields.UUIDField(null=True)
+    lease_until = fields.DatetimeField(null=True)
+    attempts = fields.IntField(default=0)
+    next_retry_at = fields.DatetimeField(null=True)
+    error_class = fields.CharField(max_length=64, null=True)
+    shadow_result = fields.JSONField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "mem_write_job"
+        unique_together = (("scope_id", "observation_id", "pipeline_version", "writer_revision"),)
 
 
 class DBMemIndexOutbox(Model):

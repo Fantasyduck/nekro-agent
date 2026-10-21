@@ -27,6 +27,7 @@ from nekro_agent.models.db_mem_fact import (
     DBMemObservation,
     DBMemScope,
     DBMemScopeGrant,
+    DBMemWriteJob,
     DBMemWriteRequest,
 )
 from nekro_agent.services.memory.contracts import FactProposal, FactStatus, MemoryError, RequestContext, SourceRef
@@ -42,7 +43,7 @@ async def isolated_db() -> AsyncIterator[None]:
     assert DB_URL == "postgres://memory_test:memory_test@127.0.0.1:5432/memory_test"
     await Tortoise.init(db_url=DB_URL, modules={"models": ["nekro_agent.models"]}, use_tz=True, timezone="UTC")
     for model in (
-        DBMemAssertionEvidence, DBMemWriteRequest, DBMemEventDelivery, DBMemLegacyMap,
+        DBMemAssertionEvidence, DBMemWriteRequest, DBMemWriteJob, DBMemEventDelivery, DBMemLegacyMap,
         DBMemIndexOutbox, DBMemDomainOutbox, DBMemAuditEvent, DBMemScopeGrant,
         DBMemAssertion, DBMemObservation, DBMemScope, DBChatMessage, DBChatChannel,
     ):
@@ -312,3 +313,13 @@ async def test_json_scalar_types_are_preserved(value: object) -> None:
     await service.propose_fact(context(), item, idempotency_key="typed")
     actual = (await service.recall(context())).items[0].value
     assert type(actual) is type(value) and actual == value
+
+
+async def test_late_old_source_cannot_overwrite_newer_message() -> None:
+    service = MemoryService()
+    old = await proposal("old")
+    new = await proposal("new")
+    await service.propose_fact(context(), new, idempotency_key="new")
+    result = await service.propose_fact(context(), old, idempotency_key="old-late")
+    assert result.status == FactStatus.PENDING
+    assert [item.value for item in (await service.recall(context())).items] == ["new"]

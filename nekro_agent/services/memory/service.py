@@ -110,6 +110,7 @@ class MemoryService:
     async def propose_fact(
         self, context: RequestContext, proposal: FactProposal, *, idempotency_key: str,
         expected_row_revision: int | None = None,
+        expected_writer_revision: int | None = None,
     ) -> ResolutionResult:
         if not idempotency_key or len(idempotency_key) > 256:
             raise MemoryError("IDEMPOTENCY_KEY_INVALID")
@@ -120,6 +121,10 @@ class MemoryService:
         fingerprint = _digest([proposal.model_dump(mode="json"), expected_row_revision])
         async with in_transaction() as conn:
             scope = await DBMemScope.filter(id=scope.id).using_db(conn).select_for_update().get()
+            if expected_writer_revision is not None and (
+                scope.writer_revision != expected_writer_revision or scope.pipeline_mode != "service"
+            ):
+                raise MemoryError("WRITER_FENCED")
             previous_request = await DBMemWriteRequest.filter(id=request_id).using_db(conn).first()
             if previous_request is not None:
                 if previous_request.fingerprint != fingerprint:
@@ -144,13 +149,28 @@ class MemoryService:
             if expected_row_revision is not None and (current is None or current.row_revision != expected_row_revision):
                 raise MemoryError("VERSION_CONFLICT")
             now = datetime.now(timezone.utc)
-            valid_from = proposal.valid_from or now
+            valid_from = proposal.valid_from or source.observed_at
             manual = proposal.source.kind == "admin_edit" and context.is_admin
+            newer_source_exists = False
+            if current is not None and not manual:
+                current_source_ids = await DBMemAssertionEvidence.filter(
+                    assertion_id=current.id,
+                ).using_db(conn).values_list("observation_id", flat=True)
+                current_sources = await DBMemObservation.filter(id__in=list(current_source_ids)).using_db(conn)
+                for known in current_sources:
+                    if known.observed_at > source.observed_at or (
+                        known.observed_at == source.observed_at and known.source_kind == source.source_kind == "message"
+                        and known.source_id.isdecimal() and source.source_id.isdecimal()
+                        and int(known.source_id) > int(source.source_id)
+                    ):
+                        newer_source_exists = True
+                        break
             pending = (
                 not manual and proposal.subject_key != source.speaker_key
                 or not manual and current is not None and current.verification_status == "manual_admin"
                 or valid_from > now
                 or current is not None and valid_from < current.valid_from
+                or newer_source_exists
             )
             same_value = current is not None and _digest(current.value_json["value"]) == _digest(proposal.value)
             if same_value and not pending:

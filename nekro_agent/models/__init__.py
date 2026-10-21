@@ -25,6 +25,7 @@ from .db_mem_fact import (  # noqa: F401
     DBMemObservation,
     DBMemScope,
     DBMemScopeGrant,
+    DBMemWriteJob,
     DBMemWriteRequest,
 )
 from .db_mem_media_resource import DBMemMediaResource  # noqa: F401
