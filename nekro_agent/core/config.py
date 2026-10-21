@@ -1662,6 +1662,94 @@ class CoreConfig(ConfigBase):
         ).model_dump(),
         description="聊天历史记录上下文最大长度，超出该长度会自动截断",
     )
+    AI_CONTEXT_WINDOW_TOKENS: int = Field(
+        default=0,
+        ge=0,
+        le=2000000,
+        title="模型上下文窗口 (Token)",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(
+                zh_CN="聊天配置",
+                en_US="Chat Configuration",
+            ),
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="模型上下文窗口 (Token)",
+                en_US="Model Context Window (tokens)",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="当前模型声明的上下文窗口。填 0 表示未声明，此时记忆块只按记忆上下文最大长度约束；填写后系统会为输出、工具结果与安全余量预留空间",
+                en_US="Declared context window of the current model. 0 means undeclared, and the memory block is then bounded only by the memory context max length; when set, space is reserved for output, tool results, and safety margin",
+            ),
+        ).model_dump(),
+        description="当前模型声明的上下文窗口 (Token)。填 0 表示未声明，此时记忆块只按记忆上下文最大长度约束",
+    )
+    AI_CONTEXT_RESERVED_OUTPUT_TOKENS: int = Field(
+        default=1024,
+        ge=0,
+        le=200000,
+        title="预留输出 Token",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(
+                zh_CN="聊天配置",
+                en_US="Chat Configuration",
+            ),
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="预留输出 Token",
+                en_US="Reserved Output Tokens",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="仅在声明了模型上下文窗口时生效，为模型回复预留的 Token 数",
+                en_US="Only effective when a model context window is declared; tokens reserved for the model reply",
+            ),
+        ).model_dump(),
+        description="仅在声明了模型上下文窗口时生效，为模型回复预留的 Token 数",
+    )
+    AI_CONTEXT_TOOL_RESERVE_TOKENS: int = Field(
+        default=0,
+        ge=0,
+        le=200000,
+        title="预留工具结果 Token",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(
+                zh_CN="聊天配置",
+                en_US="Chat Configuration",
+            ),
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="预留工具结果 Token",
+                en_US="Reserved Tool Result Tokens",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="仅在声明了模型上下文窗口时生效，为后续迭代中的工具结果预留的 Token 数",
+                en_US="Only effective when a model context window is declared; tokens reserved for tool results in later iterations",
+            ),
+        ).model_dump(),
+        description="仅在声明了模型上下文窗口时生效，为后续迭代中的工具结果预留的 Token 数",
+    )
+    AI_CONTEXT_SAFETY_MARGIN_TOKENS: int = Field(
+        default=256,
+        ge=0,
+        le=200000,
+        title="上下文安全余量 Token",
+        json_schema_extra=ExtraField(
+            i18n_category=i18n_text(
+                zh_CN="聊天配置",
+                en_US="Chat Configuration",
+            ),
+            overridable=True,
+            i18n_title=i18n_text(
+                zh_CN="上下文安全余量 Token",
+                en_US="Context Safety Margin Tokens",
+            ),
+            i18n_description=i18n_text(
+                zh_CN="仅在声明了模型上下文窗口时生效，为估算误差保留的 Token 数",
+                en_US="Only effective when a model context window is declared; tokens reserved for estimation error",
+            ),
+        ).model_dump(),
+        description="仅在声明了模型上下文窗口时生效，为估算误差保留的 Token 数",
+    )
     AI_VISION_IMAGE_LIMIT: int = Field(
         default=5,
         title="视觉参考图片数量限制",

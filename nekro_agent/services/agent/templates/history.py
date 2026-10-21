@@ -297,6 +297,7 @@ async def _inject_memory_context(
     max_length: int | None = None,
     *,
     chat_key: str,
+    prompt_overhead_units: int = 0,
 ) -> str:
     """注入记忆上下文
 
@@ -304,38 +305,54 @@ async def _inject_memory_context(
         workspace_id: 工作区 ID
         recent_messages: 近期消息列表（用于构建查询）
         max_memories: 最大记忆数量
-        max_length: 最大字符长度
+        max_length: 最大字符长度（记忆块预算上界，不声明窗口时使用）
+        chat_key: 当前频道
+        prompt_overhead_units: 已占用的系统提示词预算（UTF-8 字节上界）
 
     Returns:
         记忆上下文字符串
     """
+    from nekro_agent.services.agent.memory_send_guard import clear_pending
+
     if workspace_id is None:
         logger.debug("跳过记忆注入: 当前频道未绑定工作区")
+        clear_pending(chat_key)
         return ""
     if not is_memory_system_enabled():
         logger.debug("跳过记忆注入: 记忆系统总开关关闭")
+        clear_pending(chat_key)
         return ""
     if max_length is None:
         max_length = config.MEMORY_CONTEXT_MAX_LENGTH
 
+    clear_pending(chat_key)
     try:
         from nekro_agent.services.memory.routing import get_memory_route
 
         route = await get_memory_route(chat_key)
         if route is not None and route.uses_service:
-            from nekro_agent.services.agent.memory_context import ContextBudget, MemoryContextBuilder
+            from nekro_agent.services.agent.memory_context import MemoryContextBuilder
+            from nekro_agent.services.agent.memory_send_guard import register_pending
+            from nekro_agent.services.agent.prompt_budget import plan_prompt_budget
             from nekro_agent.services.memory.service import MemoryService
 
-            # 这里是整个 prompt 中记忆块的保守上限；其他模板仍由现有主循环预算管理。
-            block_budget = max(1, max_length)
-            bundle = await MemoryContextBuilder(MemoryService()).build(
-                route.context(actor_key="service:answer", purpose="answer"),
-                ContextBudget(
-                    model_limit=block_budget, reserved_output=0, tool_reserve=0,
-                    safety_margin=0, prompt_overhead=0, memory_limit=block_budget,
-                ),
+            # 声明了模型窗口时按整个窗口分配预算，否则回退为只约束记忆块。
+            plan = plan_prompt_budget(
+                config,
+                prompt_overhead_units=prompt_overhead_units,
+                memory_limit_units=max(1, max_length),
             )
-            return bundle.text + "\n\n" if bundle.fact_ids else ""
+            context = route.context(actor_key="service:answer", purpose="answer")
+            bundle = await MemoryContextBuilder(MemoryService()).build(context, plan.budget)
+            if not bundle.fact_ids:
+                return ""
+            text = bundle.text + "\n\n"
+            register_pending(chat_key=chat_key, text=text, bundle=bundle, context=context)
+            logger.debug(
+                f"记忆上下文已装配并登记发送前复核: facts={len(bundle.fact_ids)} "
+                f"budget_method={plan.method} used={bundle.used_units}/{plan.budget.available}",
+            )
+            return text
         from nekro_agent.services.memory.retriever import (
             MemoryRecallQuery,
             compile_memories_for_context,
@@ -534,7 +551,12 @@ async def render_history_data(
     model_group: Optional[ModelConfigGroup] = None,
     bot_platform_id: str = "",
     trigger_message: Optional[ChatMessage] = None,
+    prompt_overhead_units: int = 0,
 ) -> OpenAIChatMessage:
+    from nekro_agent.services.agent.memory_send_guard import clear_pending
+
+    # 每轮装配都重置登记，避免上一轮遗留的记忆证据被发送前复核误用
+    clear_pending(chat_key)
     if record_sta_timestamp is None:
         record_sta_timestamp = int(time.time() - config.AI_CHAT_CONTEXT_EXPIRE_SECONDS)
 
@@ -675,6 +697,7 @@ async def render_history_data(
         workspace_id=db_chat_channel.workspace_id,
         recent_messages=recent_chat_messages,
         chat_key=chat_key,
+        prompt_overhead_units=prompt_overhead_units,
     )
     if memory_context:
         logger.debug(f"历史提示词已注入记忆块: workspace={db_chat_channel.workspace_id}, length={len(memory_context)}")

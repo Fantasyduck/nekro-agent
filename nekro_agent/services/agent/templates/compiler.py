@@ -139,6 +139,7 @@ class PromptCompiler:
         config: CoreConfig,
         model_group: ModelConfigGroup,
         trigger_message: Optional[ChatMessage] = None,
+        prompt_overhead_units: int = 0,
     ) -> OpenAIChatMessage:
         return OpenAIChatMessage.from_template("user", HistoryFirstStart(enable_cot=self.enable_cot), default_env).extend(
             await render_history_data(
@@ -150,5 +151,6 @@ class PromptCompiler:
                 config=config,
                 bot_platform_id=self.bot_platform_id,
                 trigger_message=trigger_message,
+                prompt_overhead_units=prompt_overhead_units,
             ),
         )

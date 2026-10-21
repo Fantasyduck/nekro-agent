@@ -19,6 +19,7 @@ from nekro_agent.services.plugin.prompt_activation import build_plugin_activatio
 from nekro_agent.services.sandbox.runner import limited_run_code
 
 from .creator import OpenAIChatMessage
+from .memory_send_guard import revalidate_before_send
 from .openai import OpenAIResponse, gen_openai_chat_response
 from .prompt_metrics import measure_prompt
 from .resolver import ParsedCodeRunData, parse_chat_response
@@ -31,6 +32,22 @@ from .trace import emit as trace_emit
 
 logger = get_sub_logger("agent_runtime")
 RECENT_ERR_LOGS = deque(maxlen=100)
+
+
+def _prompt_text_units(messages: List[OpenAIChatMessage]) -> int:
+    """统计已装配消息的文本字节上界，作为记忆预算里的固定开销。"""
+    units = 0
+    for message in messages:
+        content = message.content
+        if isinstance(content, str):
+            units += len(content.encode("utf-8"))
+            continue
+        if not isinstance(content, list):
+            continue
+        for segment in content:
+            if isinstance(segment, dict) and isinstance(segment.get("text"), str):
+                units += len(segment["text"].encode("utf-8"))
+    return units
 
 
 def _summarize_runtime_text(text: str, limit: int = 160) -> str:
@@ -161,6 +178,7 @@ async def run_agent(
 
     messages = [prompt_compiler.render_system_message()]
     messages.extend(prompt_compiler.render_practice_messages(adapter_dialog_examples, adapter_jinja_env))
+    # 记忆块预算要扣除已经确定要发送的固定提示词，避免整窗超限
     messages.append(
         await prompt_compiler.render_history_message(
             chat_key=chat_key,
@@ -169,6 +187,7 @@ async def run_agent(
             config=config,
             model_group=used_model_group,
             trigger_message=chat_message,
+            prompt_overhead_units=_prompt_text_units(messages),
         ),
     )
 
@@ -358,6 +377,7 @@ async def run_agent(
                 trigger_message=chat_message,
                 model_group=used_model_group,
                 config=config,
+                prompt_overhead_units=_prompt_text_units(messages),
             ),
         )
 
@@ -444,6 +464,14 @@ async def send_agent_request(
 
     used_model_group: ModelConfigGroup = model_group  # 记录实际使用的模型组
     retry_errors: list[str] = []
+
+    # 发送前复核记忆证据：失败只移除记忆块并继续发送，绝不阻断本轮对话
+    try:
+        guard_status = await revalidate_before_send(messages, chat_key)
+        if guard_status != "skipped":
+            logger.debug(f"[send_agent_request] {chat_key} | 记忆证据复核结果={guard_status}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[send_agent_request] {chat_key} | 记忆证据复核异常，保留原 prompt 继续发送: {e}")
 
     for i in range(config.AI_CHAT_LLM_API_MAX_RETRIES):
         use_model_group: ModelConfigGroup = model_group if i < config.AI_CHAT_LLM_API_MAX_RETRIES - 1 else fallback_model_group
