@@ -14,6 +14,19 @@ from .db_kb_document import DBKBDocument  # noqa: F401
 from .db_kb_document_reference import DBKBDocumentReference  # noqa: F401
 from .db_mem_entity import DBMemEntity  # noqa: F401
 from .db_mem_episode import DBMemEpisode  # noqa: F401
+from .db_mem_fact import (  # noqa: F401
+    DBMemAssertion,
+    DBMemAssertionEvidence,
+    DBMemAuditEvent,
+    DBMemDomainOutbox,
+    DBMemEventDelivery,
+    DBMemIndexOutbox,
+    DBMemLegacyMap,
+    DBMemObservation,
+    DBMemScope,
+    DBMemScopeGrant,
+    DBMemWriteRequest,
+)
 from .db_mem_media_resource import DBMemMediaResource  # noqa: F401
 from .db_mem_paragraph import DBMemParagraph  # noqa: F401
 from .db_mem_reinforcement_log import DBMemReinforcementLog  # noqa: F401
