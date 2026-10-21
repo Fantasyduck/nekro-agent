@@ -26,6 +26,7 @@ from nekro_agent.models.db_mem_relation import DBMemRelation
 from nekro_agent.services.memory.embedding_service import embed_text
 from nekro_agent.services.memory.feature_flags import is_memory_system_enabled
 from nekro_agent.services.memory.qdrant_manager import memory_qdrant_manager
+from nekro_agent.services.memory.read_scope import MemoryReadScope, MemoryScopeError, require_read_scope
 from nekro_agent.services.memory.recall_contract import (
     MEMORY_CONTEXT_BLOCK_TITLE,
     MEMORY_CONTEXT_CATEGORY_LABELS,
@@ -97,8 +98,9 @@ class MemoryRetriever:
     3. 记录访问日志（用于后续强化）
     """
 
-    def __init__(self, workspace_id: int):
+    def __init__(self, workspace_id: int, *, scope: MemoryReadScope | None = None):
         self.workspace_id = workspace_id
+        self.scope = require_read_scope(workspace_id, scope)
 
     async def retrieve(
         self,
@@ -132,10 +134,23 @@ class MemoryRetriever:
                 total_candidates=0,
             )
 
+        if self.scope.is_channel and include_inactive:
+            raise MemoryScopeError("频道回答不能读取已失活记忆")
+
         resolved_limit = limit if limit is not None else config.MEMORY_RETRIEVAL_DEFAULT_LIMIT
         resolved_min_similarity = (
             min_similarity if min_similarity is not None else config.MEMORY_RETRIEVAL_MIN_SIMILARITY
         )
+        allowed_paragraphs: dict[int, DBMemParagraph] | None = None
+        if self.scope.is_channel:
+            scoped_query = DBMemParagraph.filter(
+                workspace_id=self.workspace_id, origin_chat_key=self.scope.chat_key,
+            )
+            if not include_inactive:
+                scoped_query = scoped_query.filter(is_inactive=False)
+            allowed_paragraphs = {paragraph.id: paragraph for paragraph in await scoped_query}
+            if not allowed_paragraphs:
+                return RetrievalResult([], 0, 0, 0)
         # 生成查询向量
         t0 = time.perf_counter()
         try:
@@ -161,6 +176,7 @@ class MemoryRetriever:
             include_inactive=include_inactive,
             event_time_from=int(time_from.timestamp()) if time_from else None,
             event_time_to=int(time_to.timestamp()) if time_to else None,
+            paragraph_ids=list(allowed_paragraphs) if allowed_paragraphs is not None else None,
         )
         search_time = (time.perf_counter() - t1) * 1000
 
@@ -168,10 +184,15 @@ class MemoryRetriever:
         paragraph_candidates: dict[int, RetrievedMemory] = {}
         paragraph_ids = [r["id"] for r in search_results]
 
-        paragraphs = await DBMemParagraph.filter(
+        paragraph_query = DBMemParagraph.filter(
             id__in=paragraph_ids,
             workspace_id=self.workspace_id,
-        ).all()
+        )
+        if self.scope.is_channel:
+            paragraph_query = paragraph_query.filter(origin_chat_key=self.scope.chat_key)
+        if not include_inactive:
+            paragraph_query = paragraph_query.filter(is_inactive=False)
+        paragraphs = await paragraph_query.all()
         paragraph_map = {p.id: p for p in paragraphs}
 
         for result in search_results:
@@ -206,6 +227,7 @@ class MemoryRetriever:
             limit=resolved_limit,
             paragraph_candidates=paragraph_candidates,
             include_inactive=include_inactive,
+            allowed_paragraphs=allowed_paragraphs,
         )
         episode_memories = await self._retrieve_episode_memories(
             query=query,
@@ -214,6 +236,7 @@ class MemoryRetriever:
             include_inactive=include_inactive,
             time_from=time_from,
             time_to=time_to,
+            allowed_paragraphs=allowed_paragraphs,
         )
 
         memories = list(paragraph_candidates.values()) + relation_memories + episode_memories
@@ -282,6 +305,7 @@ class MemoryRetriever:
         limit: int,
         paragraph_candidates: dict[int, RetrievedMemory],
         include_inactive: bool,
+        allowed_paragraphs: dict[int, DBMemParagraph] | None,
     ) -> list[RetrievedMemory]:
         """从实体关系图谱中检索相关记忆，并对关联段落进行加权。"""
         terms = self._tokenize_query(query)
@@ -313,6 +337,8 @@ class MemoryRetriever:
             relation_query,
             workspace_id=self.workspace_id,
         )
+        if allowed_paragraphs is not None:
+            relation_qs = relation_qs.filter(paragraph_id__in=list(allowed_paragraphs))
         if not include_inactive:
             relation_qs = relation_qs.filter(is_inactive=False)
         relations = await relation_qs.order_by("-update_time").limit(limit * 3)
@@ -328,6 +354,8 @@ class MemoryRetriever:
 
         relation_memories: list[RetrievedMemory] = []
         for relation in relations:
+            if allowed_paragraphs is not None and relation.paragraph_id not in allowed_paragraphs:
+                continue
             subject_name = entity_map.get(relation.subject_entity_id).canonical_name if relation.subject_entity_id in entity_map else str(relation.subject_entity_id)
             object_name = entity_map.get(relation.object_entity_id).canonical_name if relation.object_entity_id in entity_map else str(relation.object_entity_id)
 
@@ -343,9 +371,12 @@ class MemoryRetriever:
             if relation.paragraph_id:
                 paragraph = paragraph_candidates.get(relation.paragraph_id)
                 if paragraph is None:
-                    linked = await DBMemParagraph.get_or_none(
-                        id=relation.paragraph_id,
-                        workspace_id=self.workspace_id,
+                    linked = (
+                        allowed_paragraphs.get(relation.paragraph_id)
+                        if allowed_paragraphs is not None
+                        else await DBMemParagraph.get_or_none(
+                            id=relation.paragraph_id, workspace_id=self.workspace_id,
+                        )
                     )
                     if linked is not None:
                         paragraph = RetrievedMemory(
@@ -383,7 +414,7 @@ class MemoryRetriever:
                     similarity_score=match_score,
                     effective_weight=effective_weight,
                     event_time=None,
-                    origin_chat_key=None,
+                    origin_chat_key=self.scope.chat_key if self.scope.is_channel else None,
                 )
             )
 
@@ -397,6 +428,7 @@ class MemoryRetriever:
         include_inactive: bool,
         time_from: datetime | None,
         time_to: datetime | None,
+        allowed_paragraphs: dict[int, DBMemParagraph] | None,
     ) -> list[RetrievedMemory]:
         """检索 Episode 级事件记忆，并给关联段落做轻量加权。"""
         terms = self._tokenize_query(query)
@@ -411,6 +443,8 @@ class MemoryRetriever:
             query_q |= Q(title__icontains=term) | Q(narrative_summary__icontains=term)
 
         episode_qs = DBMemEpisode.filter(workspace_id=self.workspace_id)
+        if self.scope.is_channel:
+            episode_qs = episode_qs.filter(origin_chat_key=self.scope.chat_key)
         if not include_inactive:
             episode_qs = episode_qs.filter(is_inactive=False)
         if time_from:
@@ -430,6 +464,15 @@ class MemoryRetriever:
         memories: list[RetrievedMemory] = []
         seen_ids: set[int] = set()
         for episode in episodes:
+            if allowed_paragraphs is not None:
+                ids = episode.paragraph_ids
+                if (
+                    not self.scope.allows_origin(episode.origin_chat_key)
+                    or not ids
+                    or any(isinstance(value, bool) or not isinstance(value, int) for value in ids)
+                    or not set(ids).issubset(allowed_paragraphs)
+                ):
+                    continue
             if episode.id in seen_ids:
                 continue
             seen_ids.add(episode.id)
@@ -580,11 +623,14 @@ class MemoryRetriever:
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
-        paragraphs = await DBMemParagraph.filter(
+        paragraph_query = DBMemParagraph.filter(
             workspace_id=self.workspace_id,
             event_time__gte=cutoff,
             is_inactive=False,
-        ).order_by("-event_time").limit(limit)
+        )
+        if self.scope.is_channel:
+            paragraph_query = paragraph_query.filter(origin_chat_key=self.scope.chat_key)
+        paragraphs = await paragraph_query.order_by("-event_time").limit(limit)
 
         return [
             RetrievedMemory(
@@ -612,9 +658,11 @@ async def retrieve_memories(
     limit: int | None = None,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    *,
+    scope: MemoryReadScope | None = None,
 ) -> list[RetrievedMemory]:
     """便捷函数：检索记忆"""
-    retriever = MemoryRetriever(workspace_id)
+    retriever = MemoryRetriever(workspace_id, scope=scope)
     result = await retriever.retrieve(query, limit=limit, time_from=time_from, time_to=time_to)
     return result.memories
 

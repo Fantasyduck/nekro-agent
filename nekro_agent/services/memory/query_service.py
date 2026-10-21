@@ -16,6 +16,7 @@ from nekro_agent.models.db_mem_entity import DBMemEntity
 from nekro_agent.models.db_mem_episode import DBMemEpisode
 from nekro_agent.models.db_mem_paragraph import CognitiveType, DBMemParagraph, KnowledgeType
 from nekro_agent.models.db_mem_relation import DBMemRelation
+from nekro_agent.services.memory.read_scope import MemoryReadScope, require_visible_memory
 from nekro_agent.services.memory.retriever import RetrievedMemory, retrieve_memories
 
 
@@ -136,6 +137,7 @@ async def search_workspace_memories(
     knowledge_type: str | None = None,
     time_from: datetime | None = None,
     time_to: datetime | None = None,
+    scope: MemoryReadScope | None = None,
 ) -> MemorySearchResponse:
     resolved_cognitive_type = _parse_cognitive_type(cognitive_type)
     resolved_knowledge_type = _parse_knowledge_type(knowledge_type)
@@ -145,6 +147,7 @@ async def search_workspace_memories(
         limit=limit,
         time_from=time_from,
         time_to=time_to,
+        scope=scope,
     )
 
     filtered_memories: list[RetrievedMemory] = []
@@ -167,7 +170,10 @@ async def get_workspace_memory_detail(
     workspace_id: int,
     memory_type: MemoryObjectType,
     memory_id: int,
+    *,
+    scope: MemoryReadScope | None = None,
 ) -> MemoryDetailResponse:
+    await require_visible_memory(workspace_id, memory_type.value, memory_id, scope)
     now_ts = time.time()
 
     if memory_type == MemoryObjectType.PARAGRAPH:
@@ -325,7 +331,10 @@ async def trace_workspace_memory_origin(
     workspace_id: int,
     memory_type: MemoryObjectType,
     memory_id: int,
+    *,
+    scope: MemoryReadScope | None = None,
 ) -> MemoryOriginTraceResponse:
+    await require_visible_memory(workspace_id, memory_type.value, memory_id, scope)
     if memory_type == MemoryObjectType.PARAGRAPH:
         paragraph = await DBMemParagraph.get_or_none(id=memory_id, workspace_id=workspace_id)
         if paragraph is None:
@@ -376,7 +385,9 @@ async def trace_workspace_memory_origin(
                 memory_type=memory_type.value,
                 memory_id=relation.id,
             )
-        return await trace_workspace_memory_origin(workspace_id, MemoryObjectType.PARAGRAPH, relation.paragraph_id)
+        return await trace_workspace_memory_origin(
+            workspace_id, MemoryObjectType.PARAGRAPH, relation.paragraph_id, scope=scope,
+        )
 
     if memory_type == MemoryObjectType.EPISODE:
         episode = await DBMemEpisode.get_or_none(id=memory_id, workspace_id=workspace_id)

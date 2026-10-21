@@ -17,6 +17,7 @@ from nekro_agent.schemas.chat_message import (
     ChatMessageSegmentImage,
 )
 from nekro_agent.services.memory.feature_flags import is_memory_system_enabled
+from nekro_agent.services.memory.read_scope import MemoryReadScope
 from nekro_agent.services.memory.recall_contract import (
     ENHANCED_RECALL_SYSTEM_PROMPT,
     MemoryAnswerStyle,
@@ -294,6 +295,8 @@ async def _inject_memory_context(
     recent_messages: List[DBChatMessage],
     max_memories: int = 8,
     max_length: int | None = None,
+    *,
+    chat_key: str,
 ) -> str:
     """注入记忆上下文
 
@@ -388,6 +391,7 @@ async def _inject_memory_context(
                 limit=max_memories,
                 time_from=recall_query.time_from,
                 time_to=recall_query.time_to,
+                scope=MemoryReadScope.for_channel(workspace_id, chat_key),
             )
             if query_spec.importance > 0 and query_spec.importance != 1.0:
                 for memory in memories:
@@ -653,6 +657,7 @@ async def render_history_data(
     memory_context = await _inject_memory_context(
         workspace_id=db_chat_channel.workspace_id,
         recent_messages=recent_chat_messages,
+        chat_key=chat_key,
     )
     if memory_context:
         logger.debug(f"历史提示词已注入记忆块: workspace={db_chat_channel.workspace_id}, length={len(memory_context)}")

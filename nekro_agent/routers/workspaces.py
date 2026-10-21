@@ -270,10 +270,13 @@ async def _build_cc_memory_handshake(workspace_id: int, instruction: str, limit:
         return CcPromptEnvelope.for_user_path(current_time=now_str, task_body=instruction)
 
     try:
+        from nekro_agent.services.memory.read_scope import MemoryReadScope
+
         memories = await retrieve_memories(
             workspace_id=workspace_id,
             query=instruction,
             limit=limit,
+            scope=MemoryReadScope.for_workspace_review(workspace_id),
         )
     except Exception as e:
         logger.debug(f"构建 CC 记忆握手失败（检索异常，可忽略）: {e}")

@@ -226,6 +226,7 @@ class MemoryQdrantManager:
         include_inactive: bool = False,
         event_time_from: int | None = None,
         event_time_to: int | None = None,
+        paragraph_ids: list[int] | None = None,
     ) -> list[dict[str, Any]]:
         """语义搜索记忆段落
 
@@ -240,17 +241,22 @@ class MemoryQdrantManager:
         Returns:
             搜索结果列表
         """
+        if paragraph_ids is not None and not paragraph_ids:
+            return []
         client = await get_qdrant_client()
         if client is None:
             return []
 
         # 构建过滤条件
-        must_conditions = [
+        must_conditions: list[qdrant_models.FieldCondition | qdrant_models.HasIdCondition] = [
             qdrant_models.FieldCondition(
                 key="workspace_id",
                 match=qdrant_models.MatchValue(value=workspace_id),
             ),
         ]
+        if paragraph_ids is not None:
+            # 旧 payload 没有来源频道，使用权威 SQL 许可的 ID 过滤，避免要求线上重建索引。
+            must_conditions.append(qdrant_models.HasIdCondition(has_id=paragraph_ids))
 
         if not include_inactive:
             must_conditions.append(
