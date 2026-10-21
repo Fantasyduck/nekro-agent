@@ -67,3 +67,37 @@ await tool_facade.import_legacy_fact(
   skipped_archived/skipped_empty/failed` 与最多 10 条错误摘要。
 
 `dry_run=true` 只统计不写入，用于上线前核对数量。
+
+## 真实库演练（2026-10-21）
+
+用 `runtime/plugin_data/luoxiQAQ.nekro_memory_angel_local/angel_memory.sqlite3` 的只读副本
+在隔离 PostgreSQL 上跑完整迁移，再重跑一轮验证幂等。
+
+| 项目 | 数值 |
+| --- | --- |
+| 旧 memories | 778（758 active、20 archived） |
+| 旧 notes | 0 |
+| 旧 facts | 1050（全部 active） |
+| 频道数 | 6 |
+| 首次迁移耗时 | 约 18 秒 |
+| 首次后断言数 / active | 1776 / 1751 |
+| 重跑后断言数 / active | 1776 / 1751（完全不变） |
+| 未登记映射的旧记录 | 0 |
+| 映射条目 | 3616（行 id + 短号） |
+| 非唯一 active 的映射 | 0 |
+
+### 演练发现并修正的问题
+
+**旧 `facts.subject` 不是身份。** 它是人写的昵称，不同用户可能都叫「用户」，按昵称
+归主体会把 4 组 11 行压成同一条，静默互相覆盖。行唯一键里本来就有 `user_id`，
+现在以它为准，没有 ID 才退回 `subject`（`migration.fact_identity`）。
+
+**同键多值必然发生。** 旧库的唯一键是 `(chat_key,user_id,subject,attribute)`，昵称不同就
+算不同行；统一事实用的是 `(scope,subject_key,predicate)`，单值谓词只保留最新一条。
+演练里有 58 行因此并入已有事实：值相同的直接命中「一致」，值不同的写入新版本并把旧
+编号改指到当前版本（`collapsed` 计数），历史版本仍在 `mem_assertion` 里可追溯。
+这类合并是要人工复核的信号，不是可以忽略的噪声——上线前应把 `collapsed` 数按频道
+核一遍，确认没有把该分开的人合到一起。
+
+**归属不明的行显式跳过。** `user_id` 与 `subject` 都为空的事实无从归属，计入
+`skipped_unowned`，不会挂到 `adapter:channel` 上冒充公共事实。本次演练为 0 行。
