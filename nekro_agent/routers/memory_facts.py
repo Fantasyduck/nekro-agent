@@ -39,6 +39,7 @@ from nekro_agent.services.memory.fact_index import (
     purge_stale_fact_collections,
 )
 from nekro_agent.services.memory.feature_flags import MemoryOperation, ensure_memory_system_enabled
+from nekro_agent.services.memory.rollout import RolloutReport, RolloutService
 from nekro_agent.services.memory.service import MemoryService
 from nekro_agent.services.user.deps import get_current_active_user
 from nekro_agent.services.user.perm import Role, require_role
@@ -62,6 +63,9 @@ _MEMORY_ERROR_MAP: dict[str, Any] = {
     "IDEMPOTENCY_KEY_INVALID": lambda code: ValidationError(reason=code),
     "RESERVED_DOMAIN": lambda code: ValidationError(reason=code),
     "KIND_INVALID": lambda code: ValidationError(reason=code),
+    "PIPELINE_MODE_INVALID": lambda code: ValidationError(reason=code),
+    "ROLLOUT_BUSY": lambda code: MemoryConflictError(reason=code),
+    "WRITER_FENCED": lambda code: MemoryConflictError(reason=code),
 }
 
 
@@ -125,6 +129,15 @@ class _RetentionOverview(BaseModel):
 
 class _CollectionPurgeResult(BaseModel):
     removed: list[str]
+
+
+class _RolloutBody(BaseModel):
+    workspace_id: int = Field(gt=0)
+    chat_key: str = Field(min_length=1, max_length=256)
+    mode: Literal["legacy_guarded", "shadow", "service"]
+    expected_writer_revision: int = Field(ge=1)
+    isolate_leases: bool = False
+    reason: str = Field(default="", max_length=64)
 
 
 def _admin_context(*, workspace_id: int, chat_key: str, username: str) -> RequestContext:
@@ -328,6 +341,37 @@ async def purge_stale_collections(
     _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
     removed = await purge_stale_fact_collections()
     return _CollectionPurgeResult(removed=removed)
+
+
+@router.get("/rollout", summary="查看频道灰度预检结果", response_model=RolloutReport)
+@require_role(Role.Admin)
+async def read_rollout_report(
+    workspace_id: int = Query(..., gt=0),
+    chat_key: str = Query(..., min_length=1, max_length=256),
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> RolloutReport:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=workspace_id, chat_key=chat_key, username=_current_user.username)
+    return await _call(RolloutService(MemoryService()).report(context))
+
+
+@router.post("/rollout", summary="切换频道的事实所有权（灰度与回滚共用）", response_model=RolloutReport)
+@require_role(Role.Admin)
+async def switch_channel_mode(
+    body: _RolloutBody,
+    _current_user: DBUser = Depends(get_current_active_user),
+) -> RolloutReport:
+    ensure_memory_system_enabled(MemoryOperation.MANAGEMENT)
+    context = _admin_context(workspace_id=body.workspace_id, chat_key=body.chat_key, username=_current_user.username)
+    return await _call(
+        RolloutService(MemoryService()).switch(
+            context,
+            mode=body.mode,
+            expected_writer_revision=body.expected_writer_revision,
+            isolate_leases=body.isolate_leases,
+            reason=body.reason,
+        ),
+    )
 
 
 @router.get("/{assertion_id}", summary="查看事实详情与版本链", response_model=FactDetail)
