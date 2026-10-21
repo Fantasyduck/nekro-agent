@@ -275,7 +275,8 @@ async def test_online_history_passes_current_channel_scope(monkeypatch: pytest.M
     ))
     monkeypatch.setattr(retriever, "retrieve_memories", recall)
     monkeypatch.setattr(retriever, "compile_memories_for_context", AsyncMock(return_value="safe"))
-    assert await history._inject_memory_context(1, [], chat_key=CHANNEL) == "safe\n\n"
+    injection = await history._inject_memory_context(1, [], chat_key=CHANNEL)
+    assert injection.text == "safe\n\n" and injection.history is None
     assert recall.await_args.kwargs["scope"] == MemoryReadScope.for_channel(1, CHANNEL)
 
 

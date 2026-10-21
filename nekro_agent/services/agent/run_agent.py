@@ -21,6 +21,7 @@ from nekro_agent.services.sandbox.runner import limited_run_code
 from .creator import OpenAIChatMessage
 from .memory_send_guard import revalidate_before_send
 from .openai import OpenAIResponse, gen_openai_chat_response
+from .prompt_budget import PromptUnits, resolve_prompt_units
 from .prompt_metrics import measure_prompt
 from .resolver import ParsedCodeRunData, parse_chat_response
 from .templates.compiler import PromptCompiler
@@ -34,19 +35,23 @@ logger = get_sub_logger("agent_runtime")
 RECENT_ERR_LOGS = deque(maxlen=100)
 
 
-def _prompt_text_units(messages: List[OpenAIChatMessage]) -> int:
-    """统计已装配消息的文本字节上界，作为记忆预算里的固定开销。"""
+def _prompt_text_units(messages: List[OpenAIChatMessage], counter: Optional[Callable[[str], int]] = None) -> int:
+    """统计已装配消息的文本占用量，作为记忆预算里的固定开销。
+
+    计量器必须与记忆预算同源（tiktoken 或 UTF-8 字节上界），否则两边不同尺度会算错余量。
+    """
+    measure = counter or (lambda text: len(text.encode("utf-8")))
     units = 0
     for message in messages:
         content = message.content
         if isinstance(content, str):
-            units += len(content.encode("utf-8"))
+            units += measure(content)
             continue
         if not isinstance(content, list):
             continue
         for segment in content:
             if isinstance(segment, dict) and isinstance(segment.get("text"), str):
-                units += len(segment["text"].encode("utf-8"))
+                units += measure(segment["text"])
     return units
 
 
@@ -176,6 +181,8 @@ async def run_agent(
         enable_at=db_chat_channel.adapter.config.SESSION_ENABLE_AT,
     )
 
+    # 计量器一次解析、全程复用：预算是同一尺度，不能两头各自估算
+    prompt_units: PromptUnits = resolve_prompt_units()
     messages = [prompt_compiler.render_system_message()]
     messages.extend(prompt_compiler.render_practice_messages(adapter_dialog_examples, adapter_jinja_env))
     # 记忆块预算要扣除已经确定要发送的固定提示词，避免整窗超限
@@ -187,7 +194,8 @@ async def run_agent(
             config=config,
             model_group=used_model_group,
             trigger_message=chat_message,
-            prompt_overhead_units=_prompt_text_units(messages),
+            prompt_overhead_units=_prompt_text_units(messages, prompt_units.counter),
+            units=prompt_units,
         ),
     )
 
@@ -365,6 +373,11 @@ async def run_agent(
                 ),
             )
 
+        # 本轮工具结果还没进 messages，但要先占住预算，否则记忆块会把它挤爆
+        pending_tool_units = _prompt_text_units(
+            [*addition_prompt_message, msg],
+            prompt_units.counter,
+        )
         # 为所有迭代对话添加新记录背景
         msg = msg.extend(
             await render_history_data(
@@ -377,7 +390,9 @@ async def run_agent(
                 trigger_message=chat_message,
                 model_group=used_model_group,
                 config=config,
-                prompt_overhead_units=_prompt_text_units(messages),
+                prompt_overhead_units=_prompt_text_units(messages, prompt_units.counter),
+                units=prompt_units,
+                tool_result_units=pending_tool_units,
             ),
         )
 

@@ -2,8 +2,9 @@ import datetime
 import json
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from lunar_python import Lunar
 from pydantic import ValidationError
@@ -36,6 +37,10 @@ from nekro_agent.tools.path_convertor import (
 
 from ..creator import ContentSegment, OpenAIChatMessage
 from .base import PromptTemplate, env, register_template
+
+if TYPE_CHECKING:
+    from nekro_agent.services.agent.memory_context import ContextBundle
+    from nekro_agent.services.agent.prompt_budget import PromptUnits
 
 logger = get_sub_logger("agent_runtime")
 
@@ -290,6 +295,21 @@ async def _build_memory_recall_plan(recent_messages: List[DBChatMessage]) -> Mem
     )
 
 
+@dataclass(frozen=True)
+class MemoryInjection:
+    """一轮 prompt 装配产出的记忆上下文结果。
+
+    text 只含记忆块（长期事实 + 关系表达）；history 是同一预算下被接纳的近期
+    消息行（按传入顺序，即由新到旧），为 None 表示本分支不接管近期窗口。
+    """
+
+    text: str = ""
+    history: Optional[Tuple[str, ...]] = None
+    units: Optional["PromptUnits"] = None
+    bundle: Optional["ContextBundle"] = None
+    rebuild: Optional[Callable[[], Awaitable[Tuple[str, Any]]]] = None
+
+
 async def _inject_memory_context(
     workspace_id: int | None,
     recent_messages: List[DBChatMessage],
@@ -298,7 +318,10 @@ async def _inject_memory_context(
     *,
     chat_key: str,
     prompt_overhead_units: int = 0,
-) -> str:
+    recent_history: Sequence[str] = (),
+    units: Optional["PromptUnits"] = None,
+    tool_result_units: int = 0,
+) -> MemoryInjection:
     """注入记忆上下文
 
     Args:
@@ -307,21 +330,24 @@ async def _inject_memory_context(
         max_memories: 最大记忆数量
         max_length: 最大字符长度（记忆块预算上界，不声明窗口时使用）
         chat_key: 当前频道
-        prompt_overhead_units: 已占用的系统提示词预算（UTF-8 字节上界）
+        prompt_overhead_units: 已占用的固定提示词预算（persona、任务与插件提示词等）
+        recent_history: 待纳入同一预算的近期消息行，由新到旧
+        units: 预算计量单位；缺省为 UTF-8 字节上界
+        tool_result_units: 本轮工具结果实际占用量，与预留取大后参与同一预算
 
     Returns:
-        记忆上下文字符串
+        MemoryInjection：记忆块文本、被接纳的近期消息行与复核用 bundle
     """
     from nekro_agent.services.agent.memory_send_guard import clear_pending
 
     if workspace_id is None:
         logger.debug("跳过记忆注入: 当前频道未绑定工作区")
         clear_pending(chat_key)
-        return ""
+        return MemoryInjection()
     if not is_memory_system_enabled():
         logger.debug("跳过记忆注入: 记忆系统总开关关闭")
         clear_pending(chat_key)
-        return ""
+        return MemoryInjection()
     if max_length is None:
         max_length = config.MEMORY_CONTEXT_MAX_LENGTH
 
@@ -337,22 +363,53 @@ async def _inject_memory_context(
             from nekro_agent.services.memory.service import MemoryService
 
             # 声明了模型窗口时按整个窗口分配预算，否则回退为只约束记忆块。
+            # 计量单位（真实 tokenizer 或字节上界）由调用方决定，装配与复核必须同尺度。
             plan = plan_prompt_budget(
                 config,
                 prompt_overhead_units=prompt_overhead_units,
                 memory_limit_units=max(1, max_length),
+                units=units,
+                tool_result_units=tool_result_units,
             )
             context = route.context(actor_key="service:answer", purpose="answer")
-            bundle = await MemoryContextBuilder(MemoryService()).build(context, plan.budget)
-            if not bundle.fact_ids:
-                return ""
-            text = bundle.text + "\n\n"
-            register_pending(chat_key=chat_key, text=text, bundle=bundle, context=context)
+            builder = MemoryContextBuilder(
+                MemoryService(),
+                counter=plan.units.counter,
+                budget_method=plan.method,
+            )
+
+            async def _rebuild() -> Tuple[str, Any]:
+                rebuilt = await builder.build(context, plan.budget, recent_history=recent_history)
+                return (f"{rebuilt.text}\n\n" if rebuilt.text else "", rebuilt)
+
+            bundle = await builder.build(context, plan.budget, recent_history=recent_history)
+            accepted_history = tuple(bundle.history)
+            text = f"{bundle.text}\n\n" if bundle.text else ""
+            if not text:
+                logger.debug(
+                    f"记忆上下文为空: facts=0 budget_method={plan.method} "
+                    f"used={bundle.used_units}/{plan.budget.available} history={len(accepted_history)}",
+                )
+                return MemoryInjection(history=accepted_history, units=plan.units, bundle=bundle)
+            register_pending(
+                chat_key=chat_key,
+                text=text,
+                bundle=bundle,
+                context=context,
+                rebuild=_rebuild,
+            )
             logger.debug(
                 f"记忆上下文已装配并登记发送前复核: facts={len(bundle.fact_ids)} "
-                f"budget_method={plan.method} used={bundle.used_units}/{plan.budget.available}",
+                f"budget_method={plan.method} used={bundle.used_units}/{plan.budget.available} "
+                f"history={len(accepted_history)}",
             )
-            return text
+            return MemoryInjection(
+                text=text,
+                history=accepted_history,
+                units=plan.units,
+                bundle=bundle,
+                rebuild=_rebuild,
+            )
         from nekro_agent.services.memory.retriever import (
             MemoryRecallQuery,
             compile_memories_for_context,
@@ -365,7 +422,7 @@ async def _inject_memory_context(
                 f"跳过记忆注入: 未生成可用检索计划, workspace={workspace_id}, "
                 f"recent_messages={len(recent_messages)}",
             )
-            return ""
+            return MemoryInjection()
 
         aggregated_focus_points: list[str] = []
         aggregated_context_texts: list[str] = []
@@ -448,7 +505,7 @@ async def _inject_memory_context(
 
         if not memories:
             logger.debug(f"跳过记忆注入: 检索完成但无可用记忆, workspace={workspace_id}")
-            return ""
+            return MemoryInjection()
 
         compiled_recall_query = MemoryRecallQuery(
             query_text="\n".join(aggregated_context_texts) or recall_plan.queries[0].query_text,
@@ -472,16 +529,17 @@ async def _inject_memory_context(
                 f"跳过记忆注入: 记忆编排结果为空, workspace={workspace_id}, "
                 f"deduped_memories={len(memories)}",
             )
-            return ""
+            return MemoryInjection()
         logger.debug(
             f"记忆注入完成: workspace={workspace_id}, deduped_memories={len(memories)}, "
             f"context_length={len(memory_context)}",
         )
-        return memory_context + "\n\n" if memory_context else ""
+        # legacy 分支不接管近期窗口（history=None），渲染逻辑保持原有字符截断。
+        return MemoryInjection(text=memory_context + "\n\n" if memory_context else "")
 
     except Exception as e:
         logger.debug(f"记忆注入失败（可忽略）: workspace={workspace_id}, error={e}")
-        return ""
+        return MemoryInjection()
 
 
 @register_template("history.j2", "history_first_start")
@@ -552,6 +610,8 @@ async def render_history_data(
     bot_platform_id: str = "",
     trigger_message: Optional[ChatMessage] = None,
     prompt_overhead_units: int = 0,
+    units: Optional["PromptUnits"] = None,
+    tool_result_units: int = 0,
 ) -> OpenAIChatMessage:
     from nekro_agent.services.agent.memory_send_guard import clear_pending
 
@@ -692,25 +752,6 @@ async def render_history_data(
             ),
         )
 
-    # 注入记忆上下文
-    memory_context = await _inject_memory_context(
-        workspace_id=db_chat_channel.workspace_id,
-        recent_messages=recent_chat_messages,
-        chat_key=chat_key,
-        prompt_overhead_units=prompt_overhead_units,
-    )
-    if memory_context:
-        logger.debug(f"历史提示词已注入记忆块: workspace={db_chat_channel.workspace_id}, length={len(memory_context)}")
-        openai_chat_message.add(ContentSegment.text_content(memory_context))
-    else:
-        logger.debug(f"历史提示词未注入记忆块: workspace={db_chat_channel.workspace_id}")
-
-    openai_chat_message.add(
-        ContentSegment.text_content(
-            "Recent Messages:\n",
-        ),
-    )
-
     ref_msg_set: Set[str] = set()
     for db_message in recent_chat_messages:
         if db_message.ext_data_obj.ref_msg_id:
@@ -728,7 +769,8 @@ async def render_history_data(
             ),
         )
 
-    # 确保总记录长度不超过最大字符长度（从后往前累积，保留较新的消息）
+    # 次级上限：确保近期窗口的记录长度不超过最大字符长度（从后往前累积，保留较新的消息）。
+    # 真正的硬上限是统一编排器的 token 预算，这里只防止超长消息把窗口一次占满。
     total_length = 0
     start_idx = 0
     for i in range(len(chat_history_prompts) - 1, -1, -1):
@@ -738,6 +780,46 @@ async def render_history_data(
             break
         total_length += prompt_length
     chat_history_prompts = chat_history_prompts[start_idx:]
+
+    # 注入记忆上下文：记忆块与近期窗口在同一编排器里竞争同一预算，优先保留较新的消息
+    newest_first = list(reversed(chat_history_prompts))
+    injection = await _inject_memory_context(
+        workspace_id=db_chat_channel.workspace_id,
+        recent_messages=recent_chat_messages,
+        chat_key=chat_key,
+        prompt_overhead_units=prompt_overhead_units,
+        recent_history=newest_first,
+        units=units,
+        tool_result_units=tool_result_units,
+    )
+    if injection.text:
+        logger.debug(
+            f"历史提示词已注入记忆块: workspace={db_chat_channel.workspace_id}, length={len(injection.text)}",
+        )
+        openai_chat_message.add(ContentSegment.text_content(injection.text))
+    else:
+        logger.debug(f"历史提示词未注入记忆块: workspace={db_chat_channel.workspace_id}")
+
+    if injection.history is not None:
+        # 编排器按传入顺序（由新到旧）接纳，这里做子序列匹配还原被接纳的行
+        accepted = list(injection.history)
+        cursor = 0
+        selected: List[str] = []
+        for line in newest_first:
+            if cursor < len(accepted) and accepted[cursor] == line:
+                selected.append(line)
+                cursor += 1
+        chat_history_prompts = list(reversed(selected))
+        if len(chat_history_prompts) < len(recent_chat_messages):
+            logger.debug(
+                f"近期窗口按统一预算接纳 {len(chat_history_prompts)}/{len(recent_chat_messages)} 条",
+            )
+
+    openai_chat_message.add(
+        ContentSegment.text_content(
+            "Recent Messages:\n",
+        ),
+    )
 
     chat_history_prompt = f"\n<{one_time_code} | message separator>\n".join(chat_history_prompts)
     chat_history_prompt += f"\n<{one_time_code} | message separator>\n"

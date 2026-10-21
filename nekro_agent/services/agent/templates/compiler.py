@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from jinja2 import Environment
 
@@ -19,6 +19,9 @@ from .practice import (
     PracticePrompt_response_2,
 )
 from .system import PersonaPrompt, PolicyKernelPrompt, RuntimeContractPrompt, SystemPrompt
+
+if TYPE_CHECKING:
+    from ..prompt_budget import PromptUnits
 
 EXAMPLE_SESSION_TOKEN = "SESSION_TOKEN"
 
@@ -140,6 +143,8 @@ class PromptCompiler:
         model_group: ModelConfigGroup,
         trigger_message: Optional[ChatMessage] = None,
         prompt_overhead_units: int = 0,
+        units: Optional["PromptUnits"] = None,
+        tool_result_units: int = 0,
     ) -> OpenAIChatMessage:
         return OpenAIChatMessage.from_template("user", HistoryFirstStart(enable_cot=self.enable_cot), default_env).extend(
             await render_history_data(
@@ -152,5 +157,7 @@ class PromptCompiler:
                 bot_platform_id=self.bot_platform_id,
                 trigger_message=trigger_message,
                 prompt_overhead_units=prompt_overhead_units,
+                units=units,
+                tool_result_units=tool_result_units,
             ),
         )

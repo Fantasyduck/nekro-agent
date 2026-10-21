@@ -10,11 +10,13 @@ from nekro_agent.services.agent.creator import OpenAIChatMessage
 from nekro_agent.services.agent.memory_context import ContextBudget, MemoryContextBuilder
 from nekro_agent.services.agent.memory_send_guard import (
     STATUS_DEGRADED,
+    STATUS_REPARSED,
     STATUS_SKIPPED,
     STATUS_VERIFIED,
     clear_pending,
     register_pending,
     remove_memory_block,
+    replace_memory_block,
     revalidate_before_send,
     take_pending,
 )
@@ -102,6 +104,64 @@ async def test_verified_context_is_kept_for_sending() -> None:
 
     assert await revalidate_before_send(messages, CHAT_KEY) == STATUS_VERIFIED
     assert "fact:" in messages[1].content[0]["text"]
+
+
+def test_replace_memory_block_swaps_only_the_block() -> None:
+    messages = messages_with_block(BLOCK)
+    replacement = '[fact:2; version:1; status:verified] alice / drink = "coffee"\n\n'
+    assert replace_memory_block(messages, BLOCK, replacement) is True
+    text = messages[1].content[0]["text"]
+    assert "fact:2" in text and "fact:1" not in text
+    assert text.startswith("history head") and "Recent Messages:" in text
+
+
+def test_replace_memory_block_with_empty_text_degrades_to_removal() -> None:
+    messages = messages_with_block(BLOCK)
+    assert replace_memory_block(messages, BLOCK, "") is True
+    assert "fact:1" not in messages[1].content[0]["text"]
+
+
+@requires_db
+async def test_recoverable_revocation_reparses_once_before_degrading() -> None:
+    service = MemoryService()
+    result = await service.propose_fact(context(), await proposal(), idempotency_key="guard-reparse")
+    bundle = await MemoryContextBuilder(service).build(context(), budget())
+    block = bundle.text + "\n\n"
+    messages = messages_with_block(block)
+
+    rebuild_calls = {"count": 0}
+
+    async def rebuild() -> tuple[str, object]:
+        rebuild_calls["count"] += 1
+        # 复核失败后重新解析：旧事实已失效，装配结果里不再包含它
+        fresh = await MemoryContextBuilder(MemoryService()).build(context(), budget())
+        return fresh.text + "\n\n", fresh
+
+    register_pending(chat_key=CHAT_KEY, text=block, bundle=bundle, context=context(), rebuild=rebuild)
+    await service.forget(context(), result.assertion_id)
+
+    assert await revalidate_before_send(messages, CHAT_KEY) == STATUS_REPARSED
+    assert rebuild_calls["count"] == 1
+    text = messages[1].content[0]["text"]
+    assert f"fact:{result.assertion_id}" not in text and "Recent Messages:" in text
+
+
+@requires_db
+async def test_failed_reparse_degrades_to_prompt_without_memory() -> None:
+    service = MemoryService()
+    result = await service.propose_fact(context(), await proposal(), idempotency_key="guard-reparse-fail")
+    bundle = await MemoryContextBuilder(service).build(context(), budget())
+    block = bundle.text + "\n\n"
+    messages = messages_with_block(block)
+
+    async def rebuild() -> tuple[str, object]:
+        raise RuntimeError("synthetic rebuild failure")
+
+    register_pending(chat_key=CHAT_KEY, text=block, bundle=bundle, context=context(), rebuild=rebuild)
+    await service.forget(context(), result.assertion_id)
+
+    assert await revalidate_before_send(messages, CHAT_KEY) == STATUS_DEGRADED
+    assert "fact:" not in messages[1].content[0]["text"]
 
 
 @requires_db

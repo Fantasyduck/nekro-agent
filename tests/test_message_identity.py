@@ -161,7 +161,7 @@ async def test_full_history_keeps_self_distinct_and_appends_original_trigger(mon
             return [bot, user]
 
     monkeypatch.setattr(history.DBChatMessage, "filter", lambda **kwargs: Query())
-    monkeypatch.setattr(history, "_inject_memory_context", AsyncMock(return_value=""))
+    monkeypatch.setattr(history, "_inject_memory_context", AsyncMock(return_value=history.MemoryInjection()))
     message = await history.render_history_data(
         chat_key="onebot_v11-group_1", db_chat_channel=SimpleNamespace(
             conversation_start_time=datetime.fromtimestamp(0), workspace_id=None,

@@ -219,7 +219,7 @@ async def test_service_history_reads_new_authority_and_never_calls_legacy_retrie
     old = AsyncMock(side_effect=AssertionError("legacy recall must not run"))
     monkeypatch.setattr(retriever, "retrieve_memories", old)
     result = await history._inject_memory_context(1, [], max_length=4096, chat_key="private_alice")
-    assert "new-authority" in result and old.await_count == 0
+    assert "new-authority" in result.text and old.await_count == 0
 
 
 async def test_service_mode_does_not_run_legacy_core_extractor(monkeypatch: pytest.MonkeyPatch) -> None:
