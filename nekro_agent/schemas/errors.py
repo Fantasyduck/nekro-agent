@@ -127,6 +127,19 @@ class ConflictError(AppError):
         super().__init__(resource=resource, **kwargs)
 
 
+class MemoryConflictError(AppError):
+    """记忆状态与请求不一致（版本已变、策略已变或来源失效）"""
+
+    http_status: ClassVar[int] = 409
+    i18n_message: ClassVar[I18nDict] = i18n_text(
+        zh_CN="记忆状态已变化: {reason}",
+        en_US="Memory state changed: {reason}",
+    )
+
+    def __init__(self, reason: str, **kwargs: Any):
+        super().__init__(reason=reason, **kwargs)
+
+
 class OperationFailedError(AppError):
     """操作失败（通用）"""
 

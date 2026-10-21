@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timezone
 from uuid import NAMESPACE_URL, UUID, uuid5
 
+from pydantic import JsonValue
 from tortoise.backends.base.client import BaseDBAsyncClient
 from tortoise.expressions import Q
 from tortoise.transactions import in_transaction
@@ -27,12 +28,16 @@ from nekro_agent.models.db_mem_fact import (
 from nekro_agent.services.memory.contracts import (
     EvidenceBundle,
     EvidenceItem,
+    FactDetail,
+    FactPage,
     FactProposal,
+    FactRecord,
     FactStatus,
     ForgetReceipt,
     MemoryError,
     RequestContext,
     ResolutionResult,
+    ScopeGrantRecord,
     SourceRef,
 )
 
@@ -381,6 +386,121 @@ class MemoryService:
                 await DBMemScopeGrant.filter(id=grant.id).using_db(conn).update(revoked_at=datetime.now(timezone.utc))
                 await DBMemScope.filter(id=scope.id).using_db(conn).update(revision=scope.revision + 1)
                 await self._control_event(scope, context, grant.id, "scope.revoked", conn)
+
+    async def list_facts(
+        self, context: RequestContext, *, subject_key: str | None = None, predicate: str | None = None,
+        status: FactStatus | None = FactStatus.ACTIVE, limit: int = 50, offset: int = 0,
+    ) -> FactPage:
+        """管理面列表；默认只列当前生效版本，历史版本需要显式查询。"""
+        if not 1 <= limit <= 200 or offset < 0:
+            raise MemoryError("LIMIT_INVALID")
+        scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
+        rows = DBMemAssertion.filter(scope_id__in=list(scopes))
+        if status is not None:
+            rows = rows.filter(status=status)
+        if subject_key is not None:
+            rows = rows.filter(subject_key=subject_key)
+        if predicate is not None:
+            rows = rows.filter(predicate=predicate)
+        total = await rows.count()
+        items: list[FactRecord] = []
+        async for row in rows.order_by("-recorded_at").offset(offset).limit(limit):
+            items.append(await self._fact_record(row, scopes[row.scope_id]))
+        return FactPage(
+            items=items, total=total, policy_revisions={str(s.id): s.revision for s in scopes.values()},
+        )
+
+    async def get_fact(self, context: RequestContext, assertion_id: UUID) -> FactDetail:
+        """详情含同逻辑键全部版本，从旧到新，便于展示纠正链路。"""
+        scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
+        target = await DBMemAssertion.filter(id=assertion_id).first()
+        if target is None or target.scope_id not in scopes:
+            raise MemoryError("SCOPE_DENIED")
+        scope = scopes[target.scope_id]
+        versions = [
+            await self._fact_record(row, scope)
+            async for row in DBMemAssertion.filter(
+                scope_id=scope.id, logical_key=target.logical_key,
+            ).order_by("semantic_version")
+        ]
+        current_row = await DBMemAssertion.filter(
+            scope_id=scope.id, logical_key=target.logical_key, status=FactStatus.ACTIVE,
+        ).order_by("-semantic_version").first()
+        current = await self._fact_record(current_row or target, scope)
+        return FactDetail(current=current, versions=versions)
+
+    async def correct_fact(
+        self, context: RequestContext, assertion_id: UUID, *, value: JsonValue,
+        confidence: float | None = None, min_favor: int | None = None,
+        expected_row_revision: int | None = None, reason: str = "",
+    ) -> ResolutionResult:
+        """管理员纠正走同一事实服务，保留旧版本并写审计；不做静默覆盖。"""
+        if not context.is_admin or context.purpose != "admin_review":
+            raise MemoryError("SCOPE_DENIED")
+        scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
+        target = await DBMemAssertion.filter(id=assertion_id).first()
+        if target is None or target.scope_id not in scopes:
+            raise MemoryError("SCOPE_DENIED")
+        target_scope = scopes[target.scope_id]
+        current = await DBMemAssertion.filter(
+            scope_id=target.scope_id, logical_key=target.logical_key, status=FactStatus.ACTIVE,
+        ).order_by("-semantic_version").first()
+        # 管理纠正只能作用于当前生效版本；历史版本要先看详情再定位到当前值。
+        if current is not None and current.id != target.id:
+            raise MemoryError("VERSION_CONFLICT")
+        if expected_row_revision is not None and target.row_revision != expected_row_revision:
+            raise MemoryError("VERSION_CONFLICT")
+        proposal = FactProposal(
+            subject_key=target.subject_key, predicate=target.predicate, value=value,
+            confidence=target.confidence if confidence is None else confidence,
+            min_favor=target.min_favor if min_favor is None else min_favor,
+            source=SourceRef(
+                kind="admin_edit",
+                id=f"admin:{_digest([context.actor_key, str(assertion_id)])[:32]}",
+                revision=_digest([str(assertion_id), value, expected_row_revision])[:32],
+            ),
+        )
+        # 目标事实可能属于别的会话 scope；写入身份仍固定为管理员审核用途。
+        scope_context = context.model_copy(update={"chat_key": target_scope.origin_chat_key})
+        result = await self.propose_fact(
+            scope_context, proposal,
+            idempotency_key=f"admin_edit:{assertion_id}:{expected_row_revision}:{_digest(value)[:16]}",
+            expected_row_revision=expected_row_revision,
+        )
+        await DBMemAuditEvent.create(
+            scope_id=target.scope_id, actor_key=context.actor_key, operation="fact.admin_edited",
+            target_id=result.assertion_id, reason_code=(reason or "admin_edit")[:64],
+        )
+        return result
+
+    async def list_grants(self, context: RequestContext) -> list[ScopeGrantRecord]:
+        """管理员查看当前工作区的跨会话授权。"""
+        if not context.is_admin or context.purpose != "admin_review":
+            raise MemoryError("SCOPE_DENIED")
+        scopes = {scope.id: scope for scope in await self._visible_scopes(context)}
+        now = datetime.now(timezone.utc)
+        records: list[ScopeGrantRecord] = []
+        async for grant in DBMemScopeGrant.filter(scope_id__in=list(scopes)).order_by("audience_chat_key"):
+            scope = scopes[grant.scope_id]
+            records.append(ScopeGrantRecord(
+                grant_id=grant.id, scope_id=scope.id, chat_key=scope.origin_chat_key,
+                audience_chat_key=grant.audience_chat_key, purpose=grant.purpose,
+                granted_by=grant.granted_by, valid_until=grant.valid_until, revoked_at=grant.revoked_at,
+                active=grant.revoked_at is None and (grant.valid_until is None or grant.valid_until > now),
+            ))
+        return records
+
+    async def _fact_record(self, row: DBMemAssertion, scope: DBMemScope) -> FactRecord:
+        return FactRecord(
+            assertion_id=row.id, scope_id=row.scope_id, chat_key=scope.origin_chat_key,
+            subject_key=row.subject_key, predicate=row.predicate, value=row.value_json["value"],
+            status=FactStatus(row.status), confidence=row.confidence, min_favor=row.min_favor,
+            verification_status=row.verification_status, semantic_version=row.semantic_version,
+            row_revision=row.row_revision, valid_from=row.valid_from, valid_to=row.valid_to,
+            supersedes_id=row.supersedes_id, recorded_at=row.recorded_at,
+            source_refs=await self._valid_sources(row.id, scope),
+            index_pending=await DBMemIndexOutbox.filter(assertion_id=row.id).exclude(state="done").exists(),
+        )
 
     async def _control_event(
         self, scope: DBMemScope, context: RequestContext, target: UUID, operation: str, conn: BaseDBAsyncClient,

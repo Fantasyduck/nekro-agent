@@ -38,6 +38,7 @@ from .events import router as events_router
 from .kb_library import router as kb_library_router
 from .logs import router as logs_router
 from .mcp import router as mcp_router
+from .memory_facts import router as memory_facts_router
 from .plugin_editor import router as plugin_editor_router
 from .plugins import router as plugins_router
 from .presets import router as presets_router
@@ -159,6 +160,7 @@ def mount_api_routes(app: FastAPI):
     api.include_router(events_router)
     api.include_router(commands_router)
     api.include_router(mcp_router)
+    api.include_router(memory_facts_router)
     api.include_router(email_router)
 
     api.include_router(load_adapters_api())

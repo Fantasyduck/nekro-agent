@@ -18,6 +18,7 @@ class MemoryOperation(StrEnum):
     PRUNE = "prune"
     EPISODE_AGGREGATION = "episode_aggregation"
     SCHEDULER = "scheduler"
+    MANAGEMENT = "management"
 
 
 _MEMORY_OPERATION_LABELS: dict[MemoryOperation, str] = {
@@ -30,6 +31,7 @@ _MEMORY_OPERATION_LABELS: dict[MemoryOperation, str] = {
     MemoryOperation.PRUNE: "记忆清理",
     MemoryOperation.EPISODE_AGGREGATION: "Episode 聚合",
     MemoryOperation.SCHEDULER: "记忆调度器",
+    MemoryOperation.MANAGEMENT: "记忆管理",
 }
 
 

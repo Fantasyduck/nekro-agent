@@ -85,3 +85,49 @@ class ForgetReceipt(BaseModel):
     logical_block_committed: bool
     affected_assertions: int
     derived_cleanup_pending: bool
+
+
+class FactRecord(BaseModel):
+    """管理面单条事实的权威投影，含当前生效值与来源。"""
+
+    assertion_id: UUID
+    scope_id: UUID
+    chat_key: str
+    subject_key: str
+    predicate: str
+    value: JsonValue
+    status: FactStatus
+    confidence: float
+    min_favor: int
+    verification_status: str
+    semantic_version: int
+    row_revision: int
+    valid_from: datetime
+    valid_to: datetime | None = None
+    supersedes_id: UUID | None = None
+    recorded_at: datetime
+    source_refs: list[SourceRef] = Field(default_factory=list)
+    index_pending: bool = False
+
+
+class FactPage(BaseModel):
+    items: list[FactRecord]
+    total: int
+    policy_revisions: dict[str, int] = Field(default_factory=dict)
+
+
+class FactDetail(BaseModel):
+    current: FactRecord
+    versions: list[FactRecord]
+
+
+class ScopeGrantRecord(BaseModel):
+    grant_id: UUID
+    scope_id: UUID
+    chat_key: str
+    audience_chat_key: str
+    purpose: str
+    granted_by: str
+    valid_until: datetime | None = None
+    revoked_at: datetime | None = None
+    active: bool
